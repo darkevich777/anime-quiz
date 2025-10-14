@@ -3,14 +3,15 @@ import random
 import requests
 from flask import Flask, request, jsonify
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 # Конфигурация
 TOKEN = os.getenv("BOT_TOKEN")
 WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://anime-quiz-hxkb.onrender.com/web/index.html")
-
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=False)
 app = Flask(__name__, static_url_path='', static_folder='web')
 
+# ====== Flask для статики ======
 @app.route('/web/<path:path>')
 def serve_web(path):
     return app.send_static_file(path)
@@ -19,14 +20,11 @@ def serve_web(path):
 def serve_web_index():
     return app.send_static_file('index.html')
 
-
+# ====== Состояние игры ======
 ANILIST_API = "https://graphql.anilist.co"
-
-# Состояние игры
 game_states = {}  # chat_id -> {players: {}, scores: {}, question: {}, admin_id: int}
 
-# ======= КВИЗ ЛОГИКА =======
-
+# ====== КВИЗ ЛОГИКА ======
 def fetch_anime_with_details():
     query = """
     query ($page: Int, $perPage: Int) {
@@ -53,7 +51,6 @@ def fetch_anime_with_details():
 def generate_question():
     anime = fetch_anime_with_details()
     title = anime["title"]["romaji"]
-
     q_type = random.choice(["genre", "year", "studio", "character"])
 
     if q_type == "genre" and anime["genres"]:
@@ -111,8 +108,7 @@ def generate_question():
 
     return generate_question()
 
-# ======= TELEGRAM БОТ =======
-
+# ====== TELEGRAM БОТ ======
 @bot.message_handler(commands=["register"])
 def register(msg):
     chat_id = msg.chat.id
@@ -139,8 +135,6 @@ def status(msg):
         text += f"- {p['name']} ({'✅' if p['answered'] else '⏳'})\n"
     bot.send_message(chat_id, text)
 
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
-
 @bot.message_handler(commands=["quiz"])
 def quiz(msg):
     chat_id = msg.chat.id
@@ -148,15 +142,13 @@ def quiz(msg):
     if not gs:
         bot.send_message(chat_id, "Сначала зарегистрируй участников командой /register")
         return
-
     params = f"?chat_id={chat_id}&user_id={msg.from_user.id}"
     url = f"{WEBAPP_BASE}{params}"
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("Открыть квиз", web_app=WebAppInfo(url=url)))
     bot.send_message(chat_id, "Открываем квиз!", reply_markup=markup)
 
-# ======= API ДЛЯ WEBAPP =======
-
+# ====== API ДЛЯ WEBAPP ======
 @app.route("/api/get_state")
 def get_state():
     chat_id = int(request.args.get("chat_id"))
@@ -219,10 +211,17 @@ def admin_reset():
     gs["question"] = None
     return jsonify({"ok": True})
 
-# ======= СТАРТ =======
+# ====== TELEGRAM WEBHOOK ======
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "!", 200
 
 if __name__ == "__main__":
-    import threading
-    t = threading.Thread(target=lambda: bot.polling(none_stop=True, timeout=30))
-    t.start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    # Устанавливаем webhook
+    bot.remove_webhook()
+    bot.set_webhook(url=f"https://anime-quiz-hxkb.onrender.com/{TOKEN}")
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
