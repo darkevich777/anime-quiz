@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Anime Quiz</title>
+  <style>
+    body { font-family: sans-serif; padding: 10px; }
+    .admin-panel { border: 1px solid #aaa; padding: 10px; margin-top: 10px; background: #f9f9f9; }
+    .player-list { margin: 10px 0; }
+    .player { margin: 5px 0; }
+    .question { font-size: 18px; margin: 10px 0; }
+    button { margin: 5px 0; padding: 5px 10px; }
+  </style>
+</head>
+<body>
+  <div id="status">Загрузка...</div>
+  <div id="question"></div>
+  <div id="options"></div>
+  <div id="admin" class="admin-panel" style="display:none;"></div>
+
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+const chat_id = urlParams.get("chat_id");
+const user_id = urlParams.get("user_id");
+
+function loadState() {
+  fetch(`/api/get_state?chat_id=${chat_id}&user_id=${user_id}`)
+    .then(r => r.json()).then(data => {
+      if (!data.ok) return;
+
+      document.getElementById("status").innerText = 
+        data.role === "admin" ? "Вы админ" : "Вы игрок";
+
+      const qDiv = document.getElementById("question");
+      const optDiv = document.getElementById("options");
+      qDiv.innerHTML = "";
+      optDiv.innerHTML = "";
+
+      if (data.question) {
+        qDiv.innerText = data.question.question;
+        data.question.options.forEach((opt, i) => {
+          const btn = document.createElement("button");
+          btn.innerText = opt;
+          btn.onclick = () => submitAnswer(i);
+          optDiv.appendChild(btn);
+        });
+      } else {
+        qDiv.innerText = "Вопроса пока нет.";
+      }
+
+      if (data.role === "admin") {
+        const adminDiv = document.getElementById("admin");
+        adminDiv.style.display = "block";
+        adminDiv.innerHTML = "<h3>Админ-панель</h3>";
+
+        let playersHtml = "<div class='player-list'><b>Игроки:</b><br>";
+        for (let uid in data.players) {
+          const p = data.players[uid];
+          playersHtml += `<div class='player'>${p.name} - ${p.answered ? "ответил ✅" : "ждём ⏳"}</div>`;
+        }
+        playersHtml += "</div>";
+
+        adminDiv.innerHTML += playersHtml;
+        adminDiv.innerHTML += "<button onclick='adminStart()'>Начать/Следующий вопрос</button>";
+        adminDiv.innerHTML += "<button onclick='adminReset()'>Сбросить игру</button>";
+      }
+    });
+}
+
+function submitAnswer(i) {
+  fetch("/api/submit", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({chat_id, user: {id: user_id}, given: i})
+  }).then(r => r.json()).then(res => {
+    alert("Ответ принят!");
+  });
+}
+
+function adminStart() {
+  fetch("/api/admin/start", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({chat_id, user_id})
+  }).then(r => r.json()).then(loadState);
+}
+
+function adminReset() {
+  fetch("/api/admin/reset", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({chat_id, user_id})
+  }).then(r => r.json()).then(loadState);
+}
+
+setInterval(loadState, 3000);
+loadState();
+</script>
+</body>
+</html>
