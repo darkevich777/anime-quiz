@@ -6,10 +6,19 @@ import telebot
 
 # Конфигурация
 TOKEN = os.getenv("BOT_TOKEN")
-WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://your-app.onrender.com/web/index.html")
+WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://anime-quiz-hxkb.onrender.com/web/index.html")
 
 bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
+app = Flask(__name__, static_url_path='', static_folder='web')
+
+@app.route('/web/<path:path>')
+def serve_web(path):
+    return app.send_static_file(path)
+
+@app.route('/web/')
+def serve_web_index():
+    return app.send_static_file('index.html')
+
 
 ANILIST_API = "https://graphql.anilist.co"
 
@@ -130,6 +139,8 @@ def status(msg):
         text += f"- {p['name']} ({'✅' if p['answered'] else '⏳'})\n"
     bot.send_message(chat_id, text)
 
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+
 @bot.message_handler(commands=["quiz"])
 def quiz(msg):
     chat_id = msg.chat.id
@@ -140,8 +151,8 @@ def quiz(msg):
 
     params = f"?chat_id={chat_id}&user_id={msg.from_user.id}"
     url = f"{WEBAPP_BASE}{params}"
-    markup = telebot.types.InlineKeyboardMarkup()
-    markup.add(telebot.types.InlineKeyboardButton("Открыть квиз", web_app=telebot.types.WebAppInfo(url=url)))
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Открыть квиз", web_app=WebAppInfo(url=url)))
     bot.send_message(chat_id, "Открываем квиз!", reply_markup=markup)
 
 # ======= API ДЛЯ WEBAPP =======
