@@ -3,7 +3,7 @@ import random
 import requests
 from flask import Flask, request, jsonify
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 
 # Конфигурация
 TOKEN = os.getenv("BOT_TOKEN")
@@ -142,10 +142,11 @@ def quiz(msg):
     if not gs:
         bot.send_message(chat_id, "Сначала зарегистрируй участников командой /register")
         return
-    params = f"?chat_id={chat_id}&user_id={msg.from_user.id}"
-    url = f"{WEBAPP_BASE}{params}"
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("Открыть квиз", web_app=WebAppInfo(url=url)))
+    from urllib.parse import urlencode  # Добавьте, если не импортировано
+    params = urlencode({"chat_id": str(chat_id), "user_id": str(msg.from_user.id)})
+    url = f"{WEBAPP_BASE}?{params}"
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)  # resize_keyboard для адаптации, one_time_keyboard для скрытия после клика
+    markup.add(KeyboardButton("Открыть квиз", web_app=WebAppInfo(url=url)))
     bot.send_message(chat_id, "Открываем квиз!", reply_markup=markup)
 
 # ====== API ДЛЯ WEBAPP ======
