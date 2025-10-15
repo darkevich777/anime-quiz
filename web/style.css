@@ -1,0 +1,19 @@
+body {
+  background-image: url('https://images.unsplash.com/photo-1611587266807-8a1a7ff9d7e8?auto=format&fit=crop&w=1400&q=80');
+  background-size: cover;
+  background-position: center;
+  animation: bgmove 20s infinite alternate ease-in-out;
+}
+
+@keyframes bgmove {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 100% 50%; }
+}
+
+button {
+  transition: transform 0.2s ease, background-color 0.3s ease;
+}
+
+button:hover {
+  transform: scale(1.05);
+}
