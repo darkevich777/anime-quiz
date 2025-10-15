@@ -1,172 +1,167 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="ru">
 <head>
-  <meta charset="utf-8">
-  <title>Anime Quiz — Mini App</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anime Quiz 🌸</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+
   <style>
-    body{font-family:Arial,Helvetica,sans-serif;padding:12px;max-width:900px;margin:auto}
-    .panel{border:1px solid #ddd;padding:10px;border-radius:8px;margin-bottom:10px}
-    .players{margin:8px 0}
-    .player{padding:6px 8px;border-bottom:1px solid #eee}
-    .player:last-child{border-bottom:none}
-    .btn{display:inline-block;padding:8px 12px;border-radius:6px;border:0;background:#2b7de9;color:#fff;cursor:pointer;margin:6px 4px}
-    .btn.secondary{background:#6c757d}
-    .options{margin-top:10px}
-    .opt{display:block;padding:8px;border-radius:6px;border:1px solid #ccc;margin:6px 0;cursor:pointer}
-    .opt.disabled{opacity:0.6;pointer-events:none}
-    #status{color:#555;margin-bottom:8px}
+    body {
+      background: url('https://i.imgur.com/Vu7BYV1.jpeg') center/cover fixed;
+      font-family: 'Nunito', sans-serif;
+      transition: background 1s ease-in-out;
+    }
+
+    .bg-overlay {
+      backdrop-filter: blur(6px);
+      background-color: rgba(0, 0, 0, 0.55);
+    }
+
+    .fade-in {
+      animation: fadeIn 0.8s ease forwards;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    button {
+      transition: all 0.3s ease;
+    }
+
+    button:hover {
+      transform: scale(1.05);
+    }
   </style>
 </head>
-<body>
-  <h2>Anime Quiz</h2>
-  <div id="status">Загрузка...</div>
+<body class="min-h-screen flex items-center justify-center text-white">
+  <div id="app" class="bg-overlay rounded-3xl shadow-2xl p-6 w-full max-w-lg fade-in">
+    <h1 class="text-3xl font-bold mb-4 text-center">🎌 Anime Quiz</h1>
 
-  <div class="panel" id="adminPanel" style="display:none">
-    <h3>Админ-панель</h3>
-    <div>
-      <button class="btn" onclick="adminStart()">🎯 Начать раунд</button>
-      <button class="btn secondary" onclick="adminReset()">🔄 Сбросить</button>
-    </div>
-    <div class="players" id="playersList"></div>
+    <div id="loading" class="text-center text-gray-300">Загрузка...</div>
+    <div id="main" class="hidden flex flex-col gap-4"></div>
   </div>
 
-  <div class="panel" id="playerPanel" style="display:none">
-    <h3>Квиз</h3>
-    <div id="questionBox">Вопроса пока нет</div>
-    <div class="options" id="optionsBox"></div>
-    <div id="playerNotice"></div>
-  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const chat_id = params.get("chat_id");
+    const user_id = params.get("user_id");
+    const api = (p) => `/api${p}`;
 
-<script>
-const qs = Object.fromEntries(new URLSearchParams(window.location.search));
-const chat_id = qs.chat_id;
-let user_id = qs.user_id;
-const API_BASE = window.location.origin;
+    const app = document.getElementById("main");
+    const loading = document.getElementById("loading");
 
-const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
-  // override user_id if available
-  user_id = user_id || tg.initDataUnsafe.user.id;
-}
-
-if (!chat_id || !user_id) {
-  document.getElementById('status').innerText = "Ошибка: не переданы chat_id/user_id в URL. Откройте квиз через кнопку в чате.";
-} else {
-  init();
-}
-
-function init(){
-  document.getElementById('status').innerText = "Подключение...";
-  loadState();
-  // poll state
-  setInterval(loadState, 2500);
-}
-
-async function loadState(){
-  try {
-    const r = await fetch(`${API_BASE}/api/get_state?chat_id=${chat_id}&user_id=${user_id}`);
-    const data = await r.json();
-    if (!data.ok) {
-      document.getElementById('status').innerText = "Игра не инициализирована. Попросите участников /register в чате.";
-      return;
+    async function loadState() {
+      try {
+        const res = await axios.get(api(`/get_state?chat_id=${chat_id}&user_id=${user_id}`));
+        if (!res.data.ok) throw new Error("Не удалось загрузить состояние");
+        renderUI(res.data);
+      } catch (e) {
+        loading.innerText = "Ошибка загрузки данных 😢";
+      }
     }
-    document.getElementById('status').innerText = data.role === 'admin' ? "Вы: Админ" : "Вы: Участник";
-    // players
-    const plDiv = document.getElementById('playersList');
-    plDiv.innerHTML = "";
-    for (const uid in data.players){
-      const p = data.players[uid];
-      const el = document.createElement('div');
-      el.className = 'player';
-      el.innerText = `${p.name} ${p.answered ? " — ответил ✅" : " — ждёт ⏳"}`;
-      plDiv.appendChild(el);
-    }
-    // show panels
-    if (data.role === 'admin') document.getElementById('adminPanel').style.display='block'; else document.getElementById('adminPanel').style.display='none';
-    document.getElementById('playerPanel').style.display = 'block';
 
-    // question
-    const q = data.question;
-    const qBox = document.getElementById('questionBox');
-    const optsBox = document.getElementById('optionsBox');
-    if (!q) {
-      qBox.innerText = "Вопроса пока нет. Ждите, пока админ начнёт раунд.";
-      optsBox.innerHTML = "";
-      return;
-    }
-    qBox.innerText = q.question;
-    optsBox.innerHTML = "";
-    // is current user already answered?
-    const answered = data.players[String(user_id)] && data.players[String(user_id)].answered;
-    for (let i=0;i<q.options.length;i++){
-      const opt = document.createElement('div');
-      opt.className = 'opt' + (answered ? ' disabled' : '');
-      opt.innerText = `${i+1}. ${q.options[i]}`;
-      opt.onclick = ()=> submitAnswer(i);
-      optsBox.appendChild(opt);
-    }
-  } catch (e) {
-    console.error(e);
-    document.getElementById('status').innerText = "Ошибка связи с сервером";
-  }
-}
+    function renderUI(state) {
+      loading.classList.add("hidden");
+      app.classList.remove("hidden");
+      app.innerHTML = "";
 
-async function submitAnswer(idx){
-  try {
-    const payload = {
-      chat_id: chat_id,
-      user: { id: Number(user_id) },
-      given: idx
-    };
-    const res = await fetch(`${API_BASE}/api/submit`, {
-      method: "POST",
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      alert("Ошибка: " + (data.error || JSON.stringify(data)));
-    } else {
-      document.getElementById('playerNotice').innerText = "Ответ отправлен.";
+      const { role, players, question, scores } = state;
+
+      // === Список игроков ===
+      const playersBlock = document.createElement("div");
+      playersBlock.innerHTML = `
+        <h2 class="text-xl font-semibold mb-2">👥 Участники</h2>
+        <ul class="space-y-1 text-gray-200">
+          ${Object.values(players)
+            .map((p) => `<li>${p.name} ${p.answered ? "✅" : "⏳"}</li>`)
+            .join("")}
+        </ul>
+      `;
+      app.appendChild(playersBlock);
+
+      // === Текущий вопрос ===
+      if (question) {
+        const qBlock = document.createElement("div");
+        qBlock.className = "fade-in mt-4";
+        qBlock.innerHTML = `
+          <h3 class="text-lg font-semibold mb-3">${question.question}</h3>
+          <div class="grid grid-cols-1 gap-2">
+            ${question.options
+              .map(
+                (opt, i) => `
+              <button
+                class="bg-pink-600 hover:bg-pink-700 rounded-xl py-2"
+                onclick="submitAnswer(${i})">${opt}</button>`
+              )
+              .join("")}
+          </div>
+        `;
+        app.appendChild(qBlock);
+      }
+
+      // === Панель администратора ===
+      if (role === "admin") {
+        const adminPanel = document.createElement("div");
+        adminPanel.className = "fade-in border-t border-gray-500 mt-6 pt-4";
+        adminPanel.innerHTML = `
+          <h3 class="text-lg font-semibold mb-3">⚙️ Панель администратора</h3>
+          <div class="flex flex-col gap-2">
+            <button id="startRound" class="bg-blue-600 hover:bg-blue-700 py-2 rounded-xl">▶️ ${
+              question ? "Следующий вопрос" : "Начать первый раунд"
+            }</button>
+            <button id="reset" class="bg-red-600 hover:bg-red-700 py-2 rounded-xl">♻️ Сбросить игру</button>
+          </div>
+        `;
+        app.appendChild(adminPanel);
+
+        document.getElementById("startRound").onclick = startRound;
+        document.getElementById("reset").onclick = resetGame;
+      }
+
+      // === Таблица очков ===
+      const scoreBlock = document.createElement("div");
+      scoreBlock.className = "fade-in mt-6";
+      scoreBlock.innerHTML = `
+        <h2 class="text-xl font-semibold mb-2">🏆 Таблица очков</h2>
+        <ul class="space-y-1 text-gray-200">
+          ${Object.entries(scores)
+            .map(
+              ([uid, sc]) => `<li>${players[uid]?.name || "??"}: <b>${sc}</b> очков</li>`
+            )
+            .join("")}
+        </ul>
+      `;
+      app.appendChild(scoreBlock);
+    }
+
+    async function startRound() {
+      await axios.post(api("/admin/start"), { chat_id, user_id });
       loadState();
     }
-  } catch (e) {
-    alert("Ошибка отправки: " + e.message);
-  }
-}
 
-// admin actions
-async function adminStart(){
-  try {
-    const res = await fetch(`${API_BASE}/api/admin/start`, {
-      method: "POST",
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ chat_id: Number(chat_id), user_id: Number(user_id) })
-    });
-    const data = await res.json();
-    if (!data.ok) alert("Ошибка старта: " + JSON.stringify(data));
-    else {
+    async function resetGame() {
+      await axios.post(api("/admin/reset"), { chat_id, user_id });
       loadState();
-      // optionally, close WebApp to return to chat
-      if (tg) tg.close();
     }
-  } catch (e) { alert("Ошибка: "+e.message); }
-}
 
-async function adminReset(){
-  if (!confirm("Сбросить игру (удалить всех участников)?")) return;
-  try {
-    const res = await fetch(`${API_BASE}/api/admin/reset`, {
-      method: "POST",
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ chat_id: Number(chat_id), user_id: Number(user_id) })
-    });
-    const data = await res.json();
-    if (!data.ok) alert("Ошибка: "+JSON.stringify(data));
-    else loadState();
-  } catch (e) { alert("Ошибка: "+e.message); }
-}
-</script>
+    async function submitAnswer(index) {
+      try {
+        await axios.post(api("/submit"), {
+          chat_id,
+          user: { id: user_id },
+          given: index,
+        });
+        document.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      } catch (e) {
+        console.log(e);
+      }
+    }
+
+    loadState();
+  </script>
 </body>
 </html>
