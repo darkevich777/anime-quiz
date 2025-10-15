@@ -2,166 +2,22 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Anime Quiz 🌸</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
-
-  <style>
-    body {
-      background: url('https://i.imgur.com/Vu7BYV1.jpeg') center/cover fixed;
-      font-family: 'Nunito', sans-serif;
-      transition: background 1s ease-in-out;
-    }
-
-    .bg-overlay {
-      backdrop-filter: blur(6px);
-      background-color: rgba(0, 0, 0, 0.55);
-    }
-
-    .fade-in {
-      animation: fadeIn 0.8s ease forwards;
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(20px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    button {
-      transition: all 0.3s ease;
-    }
-
-    button:hover {
-      transform: scale(1.05);
-    }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anime Quiz</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <script src="https://unpkg.com/framer-motion@10.12.16/dist/framer-motion.umd.js"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="style.css">
 </head>
-<body class="min-h-screen flex items-center justify-center text-white">
-  <div id="app" class="bg-overlay rounded-3xl shadow-2xl p-6 w-full max-w-lg fade-in">
-    <h1 class="text-3xl font-bold mb-4 text-center">🎌 Anime Quiz</h1>
+<body class="bg-gradient-to-br from-purple-900 to-indigo-900 min-h-screen flex flex-col items-center justify-center text-white font-mono">
 
-    <div id="loading" class="text-center text-gray-300">Загрузка...</div>
-    <div id="main" class="hidden flex flex-col gap-4"></div>
+  <div id="app" class="w-full max-w-md p-6 bg-opacity-20 bg-black rounded-3xl shadow-2xl backdrop-blur-lg border border-purple-600">
+    <h1 class="text-3xl font-bold text-center mb-6 animate-pulse">✨ Anime Quiz ✨</h1>
+    <div id="content" class="space-y-4 text-center">
+      <p class="text-lg">Загрузка...</p>
+    </div>
   </div>
 
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    const chat_id = params.get("chat_id");
-    const user_id = params.get("user_id");
-    const api = (p) => `/api${p}`;
-
-    const app = document.getElementById("main");
-    const loading = document.getElementById("loading");
-
-    async function loadState() {
-      try {
-        const res = await axios.get(api(`/get_state?chat_id=${chat_id}&user_id=${user_id}`));
-        if (!res.data.ok) throw new Error("Не удалось загрузить состояние");
-        renderUI(res.data);
-      } catch (e) {
-        loading.innerText = "Ошибка загрузки данных 😢";
-      }
-    }
-
-    function renderUI(state) {
-      loading.classList.add("hidden");
-      app.classList.remove("hidden");
-      app.innerHTML = "";
-
-      const { role, players, question, scores } = state;
-
-      // === Список игроков ===
-      const playersBlock = document.createElement("div");
-      playersBlock.innerHTML = `
-        <h2 class="text-xl font-semibold mb-2">👥 Участники</h2>
-        <ul class="space-y-1 text-gray-200">
-          ${Object.values(players)
-            .map((p) => `<li>${p.name} ${p.answered ? "✅" : "⏳"}</li>`)
-            .join("")}
-        </ul>
-      `;
-      app.appendChild(playersBlock);
-
-      // === Текущий вопрос ===
-      if (question) {
-        const qBlock = document.createElement("div");
-        qBlock.className = "fade-in mt-4";
-        qBlock.innerHTML = `
-          <h3 class="text-lg font-semibold mb-3">${question.question}</h3>
-          <div class="grid grid-cols-1 gap-2">
-            ${question.options
-              .map(
-                (opt, i) => `
-              <button
-                class="bg-pink-600 hover:bg-pink-700 rounded-xl py-2"
-                onclick="submitAnswer(${i})">${opt}</button>`
-              )
-              .join("")}
-          </div>
-        `;
-        app.appendChild(qBlock);
-      }
-
-      // === Панель администратора ===
-      if (role === "admin") {
-        const adminPanel = document.createElement("div");
-        adminPanel.className = "fade-in border-t border-gray-500 mt-6 pt-4";
-        adminPanel.innerHTML = `
-          <h3 class="text-lg font-semibold mb-3">⚙️ Панель администратора</h3>
-          <div class="flex flex-col gap-2">
-            <button id="startRound" class="bg-blue-600 hover:bg-blue-700 py-2 rounded-xl">▶️ ${
-              question ? "Следующий вопрос" : "Начать первый раунд"
-            }</button>
-            <button id="reset" class="bg-red-600 hover:bg-red-700 py-2 rounded-xl">♻️ Сбросить игру</button>
-          </div>
-        `;
-        app.appendChild(adminPanel);
-
-        document.getElementById("startRound").onclick = startRound;
-        document.getElementById("reset").onclick = resetGame;
-      }
-
-      // === Таблица очков ===
-      const scoreBlock = document.createElement("div");
-      scoreBlock.className = "fade-in mt-6";
-      scoreBlock.innerHTML = `
-        <h2 class="text-xl font-semibold mb-2">🏆 Таблица очков</h2>
-        <ul class="space-y-1 text-gray-200">
-          ${Object.entries(scores)
-            .map(
-              ([uid, sc]) => `<li>${players[uid]?.name || "??"}: <b>${sc}</b> очков</li>`
-            )
-            .join("")}
-        </ul>
-      `;
-      app.appendChild(scoreBlock);
-    }
-
-    async function startRound() {
-      await axios.post(api("/admin/start"), { chat_id, user_id });
-      loadState();
-    }
-
-    async function resetGame() {
-      await axios.post(api("/admin/reset"), { chat_id, user_id });
-      loadState();
-    }
-
-    async function submitAnswer(index) {
-      try {
-        await axios.post(api("/submit"), {
-          chat_id,
-          user: { id: user_id },
-          given: index,
-        });
-        document.querySelectorAll("button").forEach((b) => (b.disabled = true));
-      } catch (e) {
-        console.log(e);
-      }
-    }
-
-    loadState();
-  </script>
+  <script src="app.js"></script>
 </body>
 </html>
