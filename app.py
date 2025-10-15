@@ -153,11 +153,22 @@ def quiz(msg):
         bot.send_message(chat_id, "Сначала зарегистрируй участников с помощью /register")
         return
 
-    params = f"?chat_id={chat_id}&user_id={msg.from_user.id}"
-    url = f"{WEBAPP_BASE}{params}"
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🎮 Открыть квиз", web_app=WebAppInfo(url=url)))
-    bot.send_message(chat_id, "Запускаем квиз!", reply_markup=markup)
+    # Отправляем персональные ссылки для каждого участника В ГРУППЕ
+    for user_id, player_data in gs["players"].items():
+        personal_params = f"?chat_id={chat_id}&user_id={user_id}"
+        personal_url = f"{WEBAPP_BASE}{personal_params}"
+        
+        personal_markup = InlineKeyboardMarkup()
+        personal_markup.add(InlineKeyboardButton(
+            f"🎮 Квиз для {player_data['name']}", 
+            web_app=WebAppInfo(url=personal_url)
+        ))
+        
+        bot.send_message(
+            chat_id, 
+            f"{player_data['name']}, твой персональный квиз:",
+            reply_markup=personal_markup
+        )
 
 
 # === API ===
