@@ -7,7 +7,6 @@ const user_id = params.get("user_id");
 
 const app = document.getElementById("content");
 
-// Добавляем отладочную информацию
 console.log("🔍 Параметры URL:", { chat_id, user_id });
 
 async function getState() {
@@ -118,7 +117,6 @@ async function startRound() {
     console.log("📨 Ответ от сервера:", result);
     
     if (result.ok) {
-      // Обновляем состояние через 1 секунду
       setTimeout(getState, 1000);
     }
   } catch (error) {
@@ -163,8 +161,6 @@ async function submitAnswer(e) {
   }
 }
 
-// Автообновление каждую 1 секунду
+// Автообновление каждую секунду
 setInterval(getState, 1000);
-
-// Первоначальная загрузка
 getState();
