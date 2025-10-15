@@ -135,35 +135,23 @@ def register(msg):
 
 @bot.message_handler(commands=["quiz"])
 def quiz(msg):
-    print(f"🚨 /quiz вызван! chat_id: {msg.chat.id}, user: {msg.from_user.first_name}")
+    print(f"🚨 /quiz вызван в чате {msg.chat.id}")
     
-    chat_id = msg.chat.id
-    gs = game_states.get(chat_id)
-    print(f"📊 Состояние игры: {gs}")
-    
-    if not gs:
-        print("❌ Нет состояния игры!")
-        bot.send_message(chat_id, "Сначала зарегистрируй участников с помощью /register")
-        return
-
-    print(f"👥 Игроки: {gs['players']}")
-
-    # Отправляем персональные ссылки для каждого участника В ГРУППЕ
-    for user_id, player_data in gs["players"].items():
-        personal_params = f"?chat_id={chat_id}&user_id={user_id}"
-        personal_url = f"{WEBAPP_BASE}{personal_params}"
+    try:
+        # Простейшая версия - просто отправляем сообщение
+        bot.send_message(msg.chat.id, "✅ Команда /quiz работает!")
         
-        personal_markup = InlineKeyboardMarkup()
-        personal_markup.add(InlineKeyboardButton(
-            f"🎮 Квиз для {player_data['name']}", 
-            web_app=WebAppInfo(url=personal_url)
-        ))
+        # Пробуем отправить кнопку без сложной логики
+        test_url = "https://example.com"  # временная тестовая ссылка
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🎮 ТЕСТ Квиз", web_app=WebAppInfo(url=test_url)))
         
-        bot.send_message(
-            chat_id, 
-            f"{player_data['name']}, твой персональный квиз:",
-            reply_markup=personal_markup
-        )
+        bot.send_message(msg.chat.id, "Проверка кнопки:", reply_markup=markup)
+        print("✅ Сообщения отправлены!")
+        
+    except Exception as e:
+        print(f"❌ Ошибка в /quiz: {e}")
+        bot.send_message(msg.chat.id, f"Ошибка: {str(e)}")
 
 
 # === API ===
@@ -251,28 +239,20 @@ def set_webhook():
 # === Запуск ===
 if __name__ == "__main__":
     import time
-
-    WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/"  # Render подставит хост
-
-    # 💥 Удаляем старый webhook, если он есть
+    
+    # ВРЕМЕННО переключаемся на поллинг для отладки
+    print("🔄 Запускаем бота в режиме POLLING...")
+    bot.remove_webhook()
+    time.sleep(1)
+    
+    # Добавляем тестовую команду для проверки
+    @bot.message_handler(commands=["test"])
+    def test_cmd(msg):
+        print(f"✅ Тестовая команда работает! Чат: {msg.chat.id}")
+        bot.send_message(msg.chat.id, "✅ Бот жив! Тест пройден.")
+    
     try:
-        bot.remove_webhook()
-        time.sleep(1)
-        bot.set_webhook(url=WEBHOOK_URL + bot.token)
-        print(f"✅ Webhook установлен: {WEBHOOK_URL}{bot.token}")
+        bot.infinity_polling()
     except Exception as e:
-        print(f"⚠️ Ошибка при установке webhook: {e}")
-
-    # Flask слушает входящие апдейты
-    @app.route(f"/{bot.token}", methods=["POST"])
-    def telegram_webhook():
-        update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
-        bot.process_new_updates([update])
-        return "ok", 200
-
-    @app.route("/")
-    def index():
-        return "✅ Bot is running on Render!", 200
-
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+        print(f"❌ Ошибка поллинга: {e}")
 
