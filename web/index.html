@@ -1,100 +1,172 @@
-<!DOCTYPE html>
-<html lang="ru">
+<!doctype html>
+<html>
 <head>
-  <meta charset="UTF-8">
-  <title>Anime Quiz</title>
+  <meta charset="utf-8">
+  <title>Anime Quiz — Mini App</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body { font-family: sans-serif; padding: 10px; }
-    .admin-panel { border: 1px solid #aaa; padding: 10px; margin-top: 10px; background: #f9f9f9; }
-    .player-list { margin: 10px 0; }
-    .player { margin: 5px 0; }
-    .question { font-size: 18px; margin: 10px 0; }
-    button { margin: 5px 0; padding: 5px 10px; }
+    body{font-family:Arial,Helvetica,sans-serif;padding:12px;max-width:900px;margin:auto}
+    .panel{border:1px solid #ddd;padding:10px;border-radius:8px;margin-bottom:10px}
+    .players{margin:8px 0}
+    .player{padding:6px 8px;border-bottom:1px solid #eee}
+    .player:last-child{border-bottom:none}
+    .btn{display:inline-block;padding:8px 12px;border-radius:6px;border:0;background:#2b7de9;color:#fff;cursor:pointer;margin:6px 4px}
+    .btn.secondary{background:#6c757d}
+    .options{margin-top:10px}
+    .opt{display:block;padding:8px;border-radius:6px;border:1px solid #ccc;margin:6px 0;cursor:pointer}
+    .opt.disabled{opacity:0.6;pointer-events:none}
+    #status{color:#555;margin-bottom:8px}
   </style>
 </head>
 <body>
+  <h2>Anime Quiz</h2>
   <div id="status">Загрузка...</div>
-  <div id="question"></div>
-  <div id="options"></div>
-  <div id="admin" class="admin-panel" style="display:none;"></div>
+
+  <div class="panel" id="adminPanel" style="display:none">
+    <h3>Админ-панель</h3>
+    <div>
+      <button class="btn" onclick="adminStart()">🎯 Начать раунд</button>
+      <button class="btn secondary" onclick="adminReset()">🔄 Сбросить</button>
+    </div>
+    <div class="players" id="playersList"></div>
+  </div>
+
+  <div class="panel" id="playerPanel" style="display:none">
+    <h3>Квиз</h3>
+    <div id="questionBox">Вопроса пока нет</div>
+    <div class="options" id="optionsBox"></div>
+    <div id="playerNotice"></div>
+  </div>
 
 <script>
-const urlParams = new URLSearchParams(window.location.search);
-const chat_id = urlParams.get("chat_id");
-const user_id = urlParams.get("user_id");
+const qs = Object.fromEntries(new URLSearchParams(window.location.search));
+const chat_id = qs.chat_id;
+let user_id = qs.user_id;
+const API_BASE = window.location.origin;
 
-function loadState() {
-  fetch(`/api/get_state?chat_id=${chat_id}&user_id=${user_id}`)
-    .then(r => r.json()).then(data => {
-      if (!data.ok) return;
+const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+  // override user_id if available
+  user_id = user_id || tg.initDataUnsafe.user.id;
+}
 
-      document.getElementById("status").innerText = 
-        data.role === "admin" ? "Вы админ" : "Вы игрок";
+if (!chat_id || !user_id) {
+  document.getElementById('status').innerText = "Ошибка: не переданы chat_id/user_id в URL. Откройте квиз через кнопку в чате.";
+} else {
+  init();
+}
 
-      const qDiv = document.getElementById("question");
-      const optDiv = document.getElementById("options");
-      qDiv.innerHTML = "";
-      optDiv.innerHTML = "";
+function init(){
+  document.getElementById('status').innerText = "Подключение...";
+  loadState();
+  // poll state
+  setInterval(loadState, 2500);
+}
 
-      if (data.question) {
-        qDiv.innerText = data.question.question;
-        data.question.options.forEach((opt, i) => {
-          const btn = document.createElement("button");
-          btn.innerText = opt;
-          btn.onclick = () => submitAnswer(i);
-          optDiv.appendChild(btn);
-        });
-      } else {
-        qDiv.innerText = "Вопроса пока нет.";
-      }
+async function loadState(){
+  try {
+    const r = await fetch(`${API_BASE}/api/get_state?chat_id=${chat_id}&user_id=${user_id}`);
+    const data = await r.json();
+    if (!data.ok) {
+      document.getElementById('status').innerText = "Игра не инициализирована. Попросите участников /register в чате.";
+      return;
+    }
+    document.getElementById('status').innerText = data.role === 'admin' ? "Вы: Админ" : "Вы: Участник";
+    // players
+    const plDiv = document.getElementById('playersList');
+    plDiv.innerHTML = "";
+    for (const uid in data.players){
+      const p = data.players[uid];
+      const el = document.createElement('div');
+      el.className = 'player';
+      el.innerText = `${p.name} ${p.answered ? " — ответил ✅" : " — ждёт ⏳"}`;
+      plDiv.appendChild(el);
+    }
+    // show panels
+    if (data.role === 'admin') document.getElementById('adminPanel').style.display='block'; else document.getElementById('adminPanel').style.display='none';
+    document.getElementById('playerPanel').style.display = 'block';
 
-      if (data.role === "admin") {
-        const adminDiv = document.getElementById("admin");
-        adminDiv.style.display = "block";
-        adminDiv.innerHTML = "<h3>Админ-панель</h3>";
+    // question
+    const q = data.question;
+    const qBox = document.getElementById('questionBox');
+    const optsBox = document.getElementById('optionsBox');
+    if (!q) {
+      qBox.innerText = "Вопроса пока нет. Ждите, пока админ начнёт раунд.";
+      optsBox.innerHTML = "";
+      return;
+    }
+    qBox.innerText = q.question;
+    optsBox.innerHTML = "";
+    // is current user already answered?
+    const answered = data.players[String(user_id)] && data.players[String(user_id)].answered;
+    for (let i=0;i<q.options.length;i++){
+      const opt = document.createElement('div');
+      opt.className = 'opt' + (answered ? ' disabled' : '');
+      opt.innerText = `${i+1}. ${q.options[i]}`;
+      opt.onclick = ()=> submitAnswer(i);
+      optsBox.appendChild(opt);
+    }
+  } catch (e) {
+    console.error(e);
+    document.getElementById('status').innerText = "Ошибка связи с сервером";
+  }
+}
 
-        let playersHtml = "<div class='player-list'><b>Игроки:</b><br>";
-        for (let uid in data.players) {
-          const p = data.players[uid];
-          playersHtml += `<div class='player'>${p.name} - ${p.answered ? "ответил ✅" : "ждём ⏳"}</div>`;
-        }
-        playersHtml += "</div>";
-
-        adminDiv.innerHTML += playersHtml;
-        adminDiv.innerHTML += "<button onclick='adminStart()'>Начать/Следующий вопрос</button>";
-        adminDiv.innerHTML += "<button onclick='adminReset()'>Сбросить игру</button>";
-      }
+async function submitAnswer(idx){
+  try {
+    const payload = {
+      chat_id: chat_id,
+      user: { id: Number(user_id) },
+      given: idx
+    };
+    const res = await fetch(`${API_BASE}/api/submit`, {
+      method: "POST",
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
     });
+    const data = await res.json();
+    if (!data.ok) {
+      alert("Ошибка: " + (data.error || JSON.stringify(data)));
+    } else {
+      document.getElementById('playerNotice').innerText = "Ответ отправлен.";
+      loadState();
+    }
+  } catch (e) {
+    alert("Ошибка отправки: " + e.message);
+  }
 }
 
-function submitAnswer(i) {
-  fetch("/api/submit", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({chat_id, user: {id: user_id}, given: i})
-  }).then(r => r.json()).then(res => {
-    alert("Ответ принят!");
-  });
+// admin actions
+async function adminStart(){
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/start`, {
+      method: "POST",
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ chat_id: Number(chat_id), user_id: Number(user_id) })
+    });
+    const data = await res.json();
+    if (!data.ok) alert("Ошибка старта: " + JSON.stringify(data));
+    else {
+      loadState();
+      // optionally, close WebApp to return to chat
+      if (tg) tg.close();
+    }
+  } catch (e) { alert("Ошибка: "+e.message); }
 }
 
-function adminStart() {
-  fetch("/api/admin/start", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({chat_id, user_id})
-  }).then(r => r.json()).then(loadState);
+async function adminReset(){
+  if (!confirm("Сбросить игру (удалить всех участников)?")) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/reset`, {
+      method: "POST",
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ chat_id: Number(chat_id), user_id: Number(user_id) })
+    });
+    const data = await res.json();
+    if (!data.ok) alert("Ошибка: "+JSON.stringify(data));
+    else loadState();
+  } catch (e) { alert("Ошибка: "+e.message); }
 }
-
-function adminReset() {
-  fetch("/api/admin/reset", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({chat_id, user_id})
-  }).then(r => r.json()).then(loadState);
-}
-
-setInterval(loadState, 3000);
-loadState();
 </script>
 </body>
 </html>
