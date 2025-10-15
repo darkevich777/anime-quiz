@@ -231,6 +231,15 @@ def admin_reset():
     gs["scores"].clear()
     gs["question"] = None
     return jsonify({"ok": True})
+    
+@app.route("/set_webhook")
+def set_webhook():
+    host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if not host:
+        return "❌ Нет хоста", 500
+    webhook_url = f"https://{host}/{TOKEN}"
+    ok = bot.set_webhook(url=webhook_url)
+    return f"✅ Webhook установлен: {webhook_url}" if ok else "❌ Ошибка установки"
 
 
 # === Запуск ===
