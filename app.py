@@ -133,25 +133,20 @@ def register(msg):
     else:
         bot.send_message(chat_id, "Ты уже участвуешь!")
 
-@bot.message_handler(commands=["status"])
-def status(msg):
-    chat_id = msg.chat.id
-    gs = game_states.get(chat_id)
-    if not gs:
-        bot.send_message(chat_id, "Игры нет.")
-        return
-    text = "Участники:\n"
-    for p in gs["players"].values():
-        text += f"- {p['name']} ({'✅' if p['answered'] else '⏳'})\n"
-    bot.send_message(chat_id, text)
-
 @bot.message_handler(commands=["quiz"])
 def quiz(msg):
+    print(f"🚨 /quiz вызван! chat_id: {msg.chat.id}, user: {msg.from_user.first_name}")
+    
     chat_id = msg.chat.id
     gs = game_states.get(chat_id)
+    print(f"📊 Состояние игры: {gs}")
+    
     if not gs:
+        print("❌ Нет состояния игры!")
         bot.send_message(chat_id, "Сначала зарегистрируй участников с помощью /register")
         return
+
+    print(f"👥 Игроки: {gs['players']}")
 
     # Отправляем персональные ссылки для каждого участника В ГРУППЕ
     for user_id, player_data in gs["players"].items():
