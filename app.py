@@ -235,25 +235,29 @@ def admin_reset():
 
 # === Запуск ===
 if __name__ == "__main__":
-    import os
+    import time
 
-    WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/"  # Render подставит домен
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL + bot.token)
+    WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/"  # Render подставит хост
 
-    from flask import Flask, request
+    # 💥 Удаляем старый webhook, если он есть
+    try:
+        bot.remove_webhook()
+        time.sleep(1)
+        bot.set_webhook(url=WEBHOOK_URL + bot.token)
+        print(f"✅ Webhook установлен: {WEBHOOK_URL}{bot.token}")
+    except Exception as e:
+        print(f"⚠️ Ошибка при установке webhook: {e}")
 
-    app = Flask(__name__)
-
+    # Flask слушает входящие апдейты
     @app.route(f"/{bot.token}", methods=["POST"])
-    def webhook():
-        json_str = request.stream.read().decode("UTF-8")
-        update = telebot.types.Update.de_json(json_str)
+    def telegram_webhook():
+        update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
         bot.process_new_updates([update])
-        return "!", 200
+        return "ok", 200
 
     @app.route("/")
     def index():
-        return "Bot is running fine!", 200
+        return "✅ Bot is running on Render!", 200
 
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
