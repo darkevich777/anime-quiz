@@ -3,15 +3,26 @@ import random
 import requests
 from flask import Flask, request, jsonify
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+# -----------------------
 # Конфигурация
+# -----------------------
 TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("Set BOT_TOKEN env var")
+
+# Полный URL к webapp (должен указывать на index.html)
 WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://anime-quiz-hxkb.onrender.com/web/index.html")
+# URL куда Telegram будет слать webhook (должен быть HTTPS и доступен)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например https://anime-quiz-hxkb.onrender.com/webhook
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
 bot = telebot.TeleBot(TOKEN, threaded=False)
+
+# Flask отдаёт статику из web/
 app = Flask(__name__, static_url_path='', static_folder='web')
 
-# ====== Flask для статики ======
 @app.route('/web/<path:path>')
 def serve_web(path):
     return app.send_static_file(path)
@@ -20,11 +31,21 @@ def serve_web(path):
 def serve_web_index():
     return app.send_static_file('index.html')
 
-# ====== Состояние игры ======
-ANILIST_API = "https://graphql.anilist.co"
-game_states = {}  # chat_id -> {players: {}, scores: {}, question: {}, admin_id: int}
+# -----------------------
+# State (in-memory)
+# -----------------------
+# game_states: chat_id -> {
+#    players: {user_id: {"name":..., "answered": bool}},
+#    scores: {user_id: int},
+#    question: {"question": str, "options": [..], "answer": idx} or None
+# }
+game_states = {}
 
-# ====== КВИЗ ЛОГИКА ======
+ANILIST_API = "https://graphql.anilist.co"
+
+# -----------------------
+# Helper: fetch/generate question
+# -----------------------
 def fetch_anime_with_details():
     query = """
     query ($page: Int, $perPage: Int) {
@@ -44,185 +65,229 @@ def fetch_anime_with_details():
     """
     page = random.randint(1, 100)
     variables = {"page": page, "perPage": 50}
-    resp = requests.post(ANILIST_API, json={"query": query, "variables": variables})
-    data = resp.json()
-    return random.choice(data["data"]["Page"]["media"])
+    try:
+        resp = requests.post(ANILIST_API, json={"query": query, "variables": variables}, timeout=10)
+        data = resp.json()
+        return random.choice(data["data"]["Page"]["media"])
+    except Exception:
+        # fallback simple
+        return {
+            "title": {"romaji": "Naruto"},
+            "startDate": {"year": 2002},
+            "genres": ["Action", "Adventure"],
+            "studios": {"nodes": [{"name": "Studio Pierrot"}]},
+            "characters": {"nodes": [{"name": {"full": "Naruto Uzumaki"}}]}
+        }
 
 def generate_question():
     anime = fetch_anime_with_details()
-    title = anime["title"]["romaji"]
+    title = anime["title"].get("romaji") if isinstance(anime["title"], dict) else anime["title"]
     q_type = random.choice(["genre", "year", "studio", "character"])
 
-    if q_type == "genre" and anime["genres"]:
+    # genre
+    if q_type == "genre" and anime.get("genres"):
         correct = random.choice(anime["genres"])
         wrongs = []
         while len(wrongs) < 3:
             other = fetch_anime_with_details()
-            if other["genres"]:
+            if other.get("genres"):
                 g = random.choice(other["genres"])
                 if g != correct and g not in wrongs:
                     wrongs.append(g)
-        options = wrongs + [correct]
-        random.shuffle(options)
-        return {"question": f"К какому жанру относится аниме *{title}*?",
-                "options": options, "answer": options.index(correct)}
+        opts = wrongs + [correct]
+        random.shuffle(opts)
+        return {"question": f"К какому жанру относится аниме «{title}»?", "options": opts, "answer": opts.index(correct)}
 
-    if q_type == "year" and anime["startDate"] and anime["startDate"]["year"]:
+    # year
+    if q_type == "year" and anime.get("startDate") and anime["startDate"].get("year"):
         correct = anime["startDate"]["year"]
-        options = [correct]
-        while len(options) < 4:
-            fake = correct + random.randint(-10, 10)
-            if fake not in options and fake > 1950:
-                options.append(fake)
-        random.shuffle(options)
-        return {"question": f"В каком году вышло аниме *{title}*?",
-                "options": [str(x) for x in options], "answer": options.index(correct)}
+        opts = [correct]
+        while len(opts) < 4:
+            fake = correct + random.randint(-8, 8)
+            if fake not in opts and fake > 1950:
+                opts.append(fake)
+        random.shuffle(opts)
+        return {"question": f"В каком году вышло аниме «{title}»?", "options": [str(x) for x in opts], "answer": opts.index(correct)}
 
-    if q_type == "studio" and anime["studios"]["nodes"]:
+    # studio
+    if q_type == "studio" and anime.get("studios") and anime["studios"].get("nodes"):
         correct = anime["studios"]["nodes"][0]["name"]
         wrongs = []
         while len(wrongs) < 3:
             other = fetch_anime_with_details()
-            if other["studios"]["nodes"]:
+            if other.get("studios") and other["studios"].get("nodes"):
                 st = other["studios"]["nodes"][0]["name"]
                 if st != correct and st not in wrongs:
                     wrongs.append(st)
-        options = wrongs + [correct]
-        random.shuffle(options)
-        return {"question": f"Какая студия выпустила аниме *{title}*?",
-                "options": options, "answer": options.index(correct)}
+        opts = wrongs + [correct]
+        random.shuffle(opts)
+        return {"question": f"Какая студия выпустила аниме «{title}»?", "options": opts, "answer": opts.index(correct)}
 
-    if q_type == "character" and anime["characters"]["nodes"]:
+    # character
+    if q_type == "character" and anime.get("characters") and anime["characters"].get("nodes"):
         correct = anime["characters"]["nodes"][0]["name"]["full"]
         wrongs = []
         while len(wrongs) < 3:
             other = fetch_anime_with_details()
-            if other["characters"]["nodes"]:
+            if other.get("characters") and other["characters"].get("nodes"):
                 ch = other["characters"]["nodes"][0]["name"]["full"]
                 if ch != correct and ch not in wrongs:
                     wrongs.append(ch)
-        options = wrongs + [correct]
-        random.shuffle(options)
-        return {"question": f"Кто главный герой в аниме *{title}*?",
-                "options": options, "answer": options.index(correct)}
+        opts = wrongs + [correct]
+        random.shuffle(opts)
+        return {"question": f"Кто главный герой в аниме «{title}»?", "options": opts, "answer": opts.index(correct)}
 
-    return generate_question()
+    # fallback
+    return {"question": "Что-то пошло не так, сгенерируйте вопрос снова.", "options": ["—","—","—","—"], "answer": 0}
 
-# ====== TELEGRAM БОТ ======
+# -----------------------
+# Telegram commands (webhook mode)
+# -----------------------
 @bot.message_handler(commands=["register"])
 def register(msg):
     chat_id = msg.chat.id
-    if chat_id not in game_states:
-        game_states[chat_id] = {"players": {}, "scores": {}, "question": None, "admin_id": msg.from_user.id}
-    gs = game_states[chat_id]
-
-    if msg.from_user.id not in gs["players"]:
-        gs["players"][msg.from_user.id] = {"name": msg.from_user.first_name, "answered": False}
-        gs["scores"][msg.from_user.id] = 0
-        bot.send_message(chat_id, f"{msg.from_user.first_name} зарегистрировался ✅")
+    user = msg.from_user
+    gs = game_states.setdefault(chat_id, {"players": {}, "scores": {}, "question": None, "admin_id": msg.from_user.id})
+    if user.id not in gs["players"]:
+        gs["players"][user.id] = {"name": user.first_name or user.username or str(user.id), "answered": False}
+        gs["scores"].setdefault(user.id, 0)
+        bot.send_message(chat_id, f"{gs['players'][user.id]['name']} зарегистрировался ✅")
     else:
-        bot.send_message(chat_id, "Ты уже участвуешь!")
+        bot.send_message(chat_id, "Ты уже зарегистрирован.")
 
 @bot.message_handler(commands=["status"])
 def status(msg):
     chat_id = msg.chat.id
     gs = game_states.get(chat_id)
     if not gs:
-        bot.send_message(chat_id, "Игры нет.")
+        bot.send_message(chat_id, "Игры нет. Зарегистрируйтесь с помощью /register")
         return
-    text = "Участники:\n"
-    for p in gs["players"].values():
-        text += f"- {p['name']} ({'✅' if p['answered'] else '⏳'})\n"
-    bot.send_message(chat_id, text)
+    lines = ["Участники:"]
+    for u,p in gs["players"].items():
+        lines.append(f"- {p['name']} {'(ответил)' if p['answered'] else '(ждёт)'}")
+    bot.send_message(chat_id, "\n".join(lines))
 
 @bot.message_handler(commands=["quiz"])
-def quiz(msg):
+def quiz_cmd(msg):
+    # в группах web_app field запрещён — используем обычную URL-кнопку, открывающую WebView в Telegram
     chat_id = msg.chat.id
     gs = game_states.get(chat_id)
     if not gs:
-        bot.send_message(chat_id, "Сначала зарегистрируй участников командой /register")
+        bot.send_message(chat_id, "Сначала зарегистрируйтесь командой /register")
         return
-    from urllib.parse import urlencode  # Добавьте, если не импортировано
-    params = urlencode({"chat_id": str(chat_id), "user_id": str(msg.from_user.id)})
-    url = f"{WEBAPP_BASE}?{params}"
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)  # resize_keyboard для адаптации, one_time_keyboard для скрытия после клика
-    markup.add(KeyboardButton("Открыть квиз", web_app=WebAppInfo(url=url)))
-    bot.send_message(chat_id, "Открываем квиз!", reply_markup=markup)
+    # формируем URL с параметрами chat_id и user_id — польза: фронт знает контекст
+    params = f"?chat_id={chat_id}&user_id={msg.from_user.id}"
+    url = f"{WEBAPP_BASE}{params}"
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🎮 Открыть квиз", url=url))
+    bot.send_message(chat_id, "Нажмите кнопку, чтобы открыть квиз (WebApp):", reply_markup=markup)
 
-# ====== API ДЛЯ WEBAPP ======
+# -----------------------
+# API для WebApp (frontend)
+# -----------------------
 @app.route("/api/get_state")
-def get_state():
-    chat_id = int(request.args.get("chat_id"))
-    user_id = int(request.args.get("user_id"))
+def api_get_state():
+    chat_id = request.args.get("chat_id", type=int)
+    user_id = request.args.get("user_id", type=int)
+    if chat_id is None or user_id is None:
+        return jsonify({"ok": False, "error": "missing_params"}), 400
     gs = game_states.get(chat_id)
-    if not gs: return jsonify({"ok": False}), 400
-    role = "admin" if gs.get("admin_id") == user_id else "player"
-    return jsonify({"ok": True, "role": role, "players": gs["players"], "question": gs["question"], "scores": gs["scores"]})
-
-@app.route("/api/submit", methods=["POST"])
-def submit_answer():
-    data = request.json
-    chat_id = int(data["chat_id"])
-    user_id = int(data["user"]["id"])
-    given = data["given"]
-
-    gs = game_states[chat_id]
-    q = gs["question"]
-    player = gs["players"].get(user_id)
-    if not player: return jsonify({"ok": False}), 400
-    if player["answered"]: return jsonify({"ok": False, "error":"already"}), 400
-
-    player["answered"] = True
-    if given == q["answer"]:
-        gs["scores"][user_id] += 1
-
-    if all(p["answered"] for p in gs["players"].values()):
-        lines = ["Раунд завершён!"]
-        for uid, pl in gs["players"].items():
-            score = gs["scores"][uid]
-            lines.append(f"{pl['name']}: {score} очков")
-        bot.send_message(chat_id, "\n".join(lines))
-
-    return jsonify({"ok": True})
+    if not gs:
+        return jsonify({"ok": False, "error": "no_game"}), 404
+    role = "admin" if gs.get("admin_id") == user_id or user_id == ADMIN_ID else "player"
+    # serialize players
+    players_serial = {str(uid): {"name": p["name"], "answered": p["answered"]} for uid,p in gs["players"].items()}
+    return jsonify({"ok": True, "role": role, "players": players_serial, "question": gs["question"], "scores": gs["scores"]})
 
 @app.route("/api/admin/start", methods=["POST"])
-def admin_start():
+def api_admin_start():
     data = request.json
-    chat_id = int(data["chat_id"])
-    user_id = int(data["user_id"])
+    chat_id = int(data.get("chat_id"))
+    user_id = int(data.get("user_id"))
     gs = game_states.get(chat_id)
-    if not gs or gs.get("admin_id") != user_id:
-        return jsonify({"ok": False, "error": "not admin"}), 403
+    if not gs or (gs.get("admin_id") != user_id and user_id != ADMIN_ID):
+        return jsonify({"ok": False, "error": "not_admin"}), 403
     q = generate_question()
     gs["question"] = q
+    # reset answered flags
     for p in gs["players"].values():
         p["answered"] = False
+    # notify group
+    try:
+        # build a short preview to post in chat
+        preview = q["question"] + "\n\nВарианты:\n" + "\n".join([f"{i+1}. {o}" for i,o in enumerate(q["options"])])
+        bot.send_message(chat_id, "Новый раунд! " + preview)
+    except Exception as e:
+        print("Failed to send preview message:", e)
     return jsonify({"ok": True, "question": q})
 
 @app.route("/api/admin/reset", methods=["POST"])
-def admin_reset():
+def api_admin_reset():
     data = request.json
-    chat_id = int(data["chat_id"])
-    user_id = int(data["user_id"])
+    chat_id = int(data.get("chat_id"))
+    user_id = int(data.get("user_id"))
     gs = game_states.get(chat_id)
-    if not gs or gs.get("admin_id") != user_id:
-        return jsonify({"ok": False, "error": "not admin"}), 403
+    if not gs or (gs.get("admin_id") != user_id and user_id != ADMIN_ID):
+        return jsonify({"ok": False, "error": "not_admin"}), 403
     gs["players"].clear()
     gs["scores"].clear()
     gs["question"] = None
     return jsonify({"ok": True})
 
-# ====== TELEGRAM WEBHOOK ======
-@app.route(f"/{TOKEN}", methods=["POST"])
+@app.route("/api/submit", methods=["POST"])
+def api_submit():
+    data = request.json
+    chat_id = int(data.get("chat_id"))
+    user = data.get("user") or {}
+    user_id = int(user.get("id"))
+    given = int(data.get("given"))
+    gs = game_states.get(chat_id)
+    if not gs:
+        return jsonify({"ok": False, "error": "no_game"}), 404
+    if user_id not in gs["players"]:
+        return jsonify({"ok": False, "error": "not_registered"}), 403
+    if gs["players"][user_id]["answered"]:
+        return jsonify({"ok": False, "error": "already_answered"}), 400
+    # register answer
+    gs["players"][user_id]["answered"] = True
+    q = gs["question"]
+    if q and given == q["answer"]:
+        gs["scores"][user_id] = gs["scores"].get(user_id, 0) + 1
+    # check if all answered
+    if all(p["answered"] for p in gs["players"].values()):
+        # publish results
+        lines = ["Раунд завершён! Результаты:"]
+        for uid,p in gs["players"].items():
+            lines.append(f"{p['name']}: {gs['scores'].get(uid,0)}")
+        bot.send_message(chat_id, "\n".join(lines))
+    return jsonify({"ok": True})
+
+# -----------------------
+# Webhook endpoint for Telegram
+# -----------------------
+@app.route("/webhook", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("utf-8")
+    if not json_str:
+        return "", 400
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return "!", 200
+    return "", 200
 
+# -----------------------
+# Startup: set webhook if provided
+# -----------------------
 if __name__ == "__main__":
-    # Устанавливаем webhook
-    bot.remove_webhook()
-    bot.set_webhook(url=f"https://anime-quiz-hxkb.onrender.com/{TOKEN}")
+    # set webhook if WEBHOOK_URL is provided
+    if WEBHOOK_URL:
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(url=WEBHOOK_URL)
+            print("Webhook set to:", WEBHOOK_URL)
+        except Exception as e:
+            print("Failed to set webhook:", e)
+    else:
+        print("Warning: WEBHOOK_URL not set. Bot will not receive updates unless webhook configured.")
+
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
