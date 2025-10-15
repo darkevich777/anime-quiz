@@ -235,6 +235,25 @@ def admin_reset():
 
 # === Запуск ===
 if __name__ == "__main__":
-    t = threading.Thread(target=lambda: bot.polling(none_stop=True, timeout=30))
-    t.start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    import os
+
+    WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/"  # Render подставит домен
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL + bot.token)
+
+    from flask import Flask, request
+
+    app = Flask(__name__)
+
+    @app.route(f"/{bot.token}", methods=["POST"])
+    def webhook():
+        json_str = request.stream.read().decode("UTF-8")
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return "!", 200
+
+    @app.route("/")
+    def index():
+        return "Bot is running fine!", 200
+
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
