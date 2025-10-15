@@ -163,8 +163,8 @@ async function submitAnswer(e) {
   }
 }
 
-// Автообновление каждые 5 секунд
-setInterval(getState, 5000);
+// Автообновление каждую 1 секунду
+setInterval(getState, 1000);
 
 // Первоначальная загрузка
 getState();
