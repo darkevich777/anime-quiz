@@ -10,7 +10,14 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
-WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://example.com/web/")  # ВАШ публичный URL c /web/
+
+WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://example.com/web/")  # ваш публичный URL c /web/
+
+# Константы
+MIN_TIMER = 5
+MAX_TIMER = 300
+DEADLINE_SLOP_SEC = 0.3  # небольшая "фора" для фронтового будильника
+
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 app = Flask(__name__, static_url_path='', static_folder='web')
 
@@ -27,7 +34,7 @@ def serve_web(path):
 def serve_web_index():
     return app.send_static_file('index.html')
 
-# Вебхук для Telegram (если используете вебхук)
+# Вебхук (если используете вебхук)
 @app.route('/webhook/', methods=['POST', 'GET'])
 def webhook_handler():
     if request.method == 'POST':
@@ -85,11 +92,9 @@ def generate_question():
                     wrongs.add(g)
         options = list(wrongs) + [correct]
         random.shuffle(options)
-        return {
-            "question": f"К какому жанру относится аниме *{title}*?",
-            "options": options, "answer": options.index(correct),
-            "correct_text": correct
-        }
+        return {"question": f"К какому жанру относится аниме *{title}*?",
+                "options": options, "answer": options.index(correct),
+                "correct_text": correct}
 
     if q_type == "year" and anime.get("startDate") and anime["startDate"].get("year"):
         correct = anime["startDate"]["year"]
@@ -100,12 +105,9 @@ def generate_question():
                 options.add(fake)
         options = list(options)
         random.shuffle(options)
-        return {
-            "question": f"В каком году вышло аниме *{title}*?",
-            "options": [str(x) for x in options],
-            "answer": options.index(correct),
-            "correct_text": str(correct)
-        }
+        return {"question": f"В каком году вышло аниме *{title}*?",
+                "options": [str(x) for x in options], "answer": options.index(correct),
+                "correct_text": str(correct)}
 
     if q_type == "studio" and anime.get("studios") and anime["studios"].get("nodes"):
         correct = anime["studios"]["nodes"][0]["name"]
@@ -118,11 +120,9 @@ def generate_question():
                     wrongs.add(st)
         options = list(wrongs) + [correct]
         random.shuffle(options)
-        return {
-            "question": f"Какая студия выпустила аниме *{title}*?",
-            "options": options, "answer": options.index(correct),
-            "correct_text": correct
-        }
+        return {"question": f"Какая студия выпустила аниме *{title}*?",
+                "options": options, "answer": options.index(correct),
+                "correct_text": correct}
 
     if q_type == "character" and anime.get("characters") and anime["characters"].get("nodes"):
         correct = anime["characters"]["nodes"][0]["name"]["full"]
@@ -135,15 +135,14 @@ def generate_question():
                     wrongs.add(ch)
         options = list(wrongs) + [correct]
         random.shuffle(options)
-        return {
-            "question": f"Кто главный герой в аниме *{title}*?",
-            "options": options, "answer": options.index(correct),
-            "correct_text": correct
-        }
+        return {"question": f"Кто главный герой в аниме *{title}*?",
+                "options": options, "answer": options.index(correct),
+                "correct_text": correct}
 
     return generate_question()
 
 # === Состояние игры ===
+game_states = {}
 # chat_id: {
 #   players: { uid: { name, answered(bool), dm_ok(bool), total_time(float), last_answer_time(float|None) } },
 #   scores: { uid: int },
@@ -154,7 +153,6 @@ def generate_question():
 #   round: { q, started_at, deadline, finished } | None,
 #   rev: int
 # }
-game_states = {}
 
 def ensure_chat_state(chat_id):
     if chat_id not in game_states:
@@ -190,11 +188,10 @@ def finalize_round_if_needed(gs, chat_id):
         return
     now = time.time()
     all_answered = all(p["answered"] for p in gs["players"].values())
-    timeout = now >= rnd["deadline"]
+    timeout = now >= rnd["deadline"] - DEADLINE_SLOP_SEC
     if not all_answered and not timeout:
         return
 
-    # Закрываем
     rnd["finished"] = True
     dur = gs["timer_seconds"] or 0
     for uid, p in gs["players"].items():
@@ -216,17 +213,24 @@ def medals_for_position(pos):
 # === Команды бота ===
 @bot.message_handler(commands=['start'])
 def start_cmd(msg):
-    text = msg.text or ""
+    """
+    /start join_<chatId> — авто-привязка к группе.
+    /start без параметра — просим вернуться в группу и повторить /register.
+    """
+    text = (msg.text or "").strip()
+
     if "join_" in text:
         try:
             chat_id = int(text.split("join_")[1].strip())
         except Exception:
             bot.send_message(msg.chat.id, "Не удалось понять, из какой группы вы регистрируетесь.")
             return
+
         gs = ensure_chat_state(chat_id)
         if gs["locked"]:
             bot.send_message(msg.chat.id, "Квиз уже начался, новых участников добавить нельзя.")
             return
+
         uid = msg.from_user.id
         name = msg.from_user.first_name or "Игрок"
         if uid not in gs["players"]:
@@ -242,6 +246,13 @@ def start_cmd(msg):
             gs["players"][uid]["dm_ok"] = True
             bump_rev(gs)
             bot.send_message(msg.chat.id, "Вы уже зарегистрированы. Удачи!")
+        return
+
+    bot.send_message(
+        msg.chat.id,
+        "Привет! 👋 Я готов к игре.\n"
+        "Теперь вернитесь в групповой чат и снова отправьте /register — бот сможет написать вам в личку и зарегистрирует вас."
+    )
 
 @bot.message_handler(commands=["register"])
 def register(msg):
@@ -274,10 +285,14 @@ def register(msg):
     if dm_ok:
         bot.send_message(chat_id, f"✅ {name} зарегистрировался(лась).")
     else:
-        link = deep_link(bot_username, chat_id)
+        link_deep = deep_link(bot_username, chat_id)
+        link_plain = f"https://t.me/{bot_username}"
         bot.send_message(
             chat_id,
-            f"⚠️ {name}, открой личный чат с ботом: {link}\nНажми *Start*, и ты автоматически зарегистрируешься."
+            f"⚠️ {name}, открой личный чат с ботом:\n"
+            f"• Deep-link для автопривязки: {link_deep}\n"
+            f"• Или просто открой бота: {link_plain} и нажми *Start*\n"
+            f"После этого вернись в группу и ещё раз отправь /register."
         )
 
 @bot.message_handler(commands=["status"])
@@ -325,8 +340,9 @@ def quiz(msg):
         except Exception:
             p["dm_ok"] = False
             try:
-                link = deep_link(bot_username, chat_id)
-                bot.send_message(chat_id, f"⚠️ {p['name']} — открой ЛС с ботом: {link}")
+                link_deep = deep_link(bot_username, chat_id)
+                link_plain = f"https://t.me/{bot_username}"
+                bot.send_message(chat_id, f"⚠️ {p['name']} — открой ЛС с ботом: {link_deep} (или {link_plain}) и нажми Start.")
             except Exception:
                 pass
 
@@ -338,10 +354,8 @@ def current_state_payload(gs, chat_id, user_id):
         "ok": True,
         "role": role,
         "players": {
-            str(uid): {
-                "name": p["name"],
-                "answered": p["answered"]
-            } for uid, p in gs["players"].items()
+            str(uid): {"name": p["name"], "answered": p["answered"]}
+            for uid, p in gs["players"].items()
         },
         "scores": gs["scores"],
         "quiz_started": gs["quiz_started"],
@@ -375,10 +389,8 @@ def get_state_api():
         user_id = int(request.args.get("user_id"))
         gs = game_states.get(chat_id)
         if not gs:
-            # Мягкий ответ: игра завершена/нет игры
             return jsonify({"ok": False, "ended": True}), 200
 
-        # авто-закрытие по таймеру при запросе состояния
         if gs["round"]:
             finalize_round_if_needed(gs, chat_id)
 
@@ -397,7 +409,7 @@ def admin_config():
         gs = game_states.get(chat_id)
         if not gs or gs["admin_id"] != user_id:
             return jsonify({"ok": False, "error": "not admin"}), 403
-        gs["timer_seconds"] = max(5, min(300, timer_seconds))
+        gs["timer_seconds"] = max(MIN_TIMER, min(MAX_TIMER, timer_seconds))
         bump_rev(gs)
         return jsonify({"ok": True, "timer_seconds": gs["timer_seconds"]})
     except Exception as e:
@@ -410,13 +422,22 @@ def admin_start_round():
         data = request.get_json(force=True)
         chat_id = int(data["chat_id"])
         user_id = int(data["user_id"])
+        # позволяем прислать timer_seconds прямо сюда (автосейв, если не задан)
+        maybe_timer = data.get("timer_seconds")
+
         gs = game_states.get(chat_id)
         if not gs or gs["admin_id"] != user_id:
             return jsonify({"ok": False, "error": "not admin"}), 403
         if not gs["quiz_started"]:
             return jsonify({"ok": False, "error": "quiz not started"}), 400
+
         if not gs.get("timer_seconds"):
-            return jsonify({"ok": False, "error": "timer not set"}), 400
+            # если прилетел timer_seconds — используем его, иначе дефолт 30
+            try:
+                val = int(maybe_timer) if maybe_timer is not None else 30
+            except Exception:
+                val = 30
+            gs["timer_seconds"] = max(MIN_TIMER, min(MAX_TIMER, val))
 
         q = generate_question()
         started_at = time.time()
@@ -426,7 +447,6 @@ def admin_start_round():
             p["answered"] = False
             p["last_answer_time"] = None
         bump_rev(gs)
-        # (НЕ шлём вопрос в группу — всё во фронте)
         return jsonify({"ok": True})
     except Exception as e:
         print(f"❌ /api/admin/start error: {e}")
@@ -442,7 +462,6 @@ def admin_next():
         if not gs or gs["admin_id"] != user_id:
             return jsonify({"ok": False, "error": "not admin"}), 403
 
-        # закрыть текущий при необходимости
         if gs["round"] and not gs["round"]["finished"]:
             finalize_round_if_needed(gs, chat_id)
 
@@ -454,7 +473,6 @@ def admin_next():
             p["answered"] = False
             p["last_answer_time"] = None
         bump_rev(gs)
-        # (НЕ шлём в группу — всё во фронте)
         return jsonify({"ok": True})
     except Exception as e:
         print(f"❌ /api/admin/next error: {e}")
@@ -470,13 +488,12 @@ def admin_end():
         if not gs or gs["admin_id"] != user_id:
             return jsonify({"ok": False, "error": "not admin"}), 403
 
-        # закрыть текущий раунд, если открыт
         if gs["round"] and not gs["round"]["finished"]:
             finalize_round_if_needed(gs, chat_id)
 
         board = compute_leaderboard(gs)
 
-        # Лидерборд в группу — ОСТАВЛЯЕМ (по ТЗ)
+        # Отправляем финальный лидерборд в группу
         lines = ["🏁 *Квиз завершён!* Итоговый лидерборд:"]
         if not board:
             lines.append("— никого нет в таблице 😅")
@@ -498,7 +515,6 @@ def admin_end():
             ]
         }
 
-        # Сброс состояния (после ответа фронту он увидит ended в /api/get_state)
         game_states.pop(chat_id, None)
         return jsonify(result_payload)
     except Exception as e:
@@ -536,7 +552,6 @@ def submit_answer():
 
         player["total_time"] += elapsed
 
-        # если все ответили — финализируем (или финализируется по таймеру)
         finalize_round_if_needed(gs, chat_id)
         bump_rev(gs)
         return jsonify({"ok": True})
@@ -544,7 +559,7 @@ def submit_answer():
         print(f"❌ /api/submit error: {e}")
         return jsonify({"ok": False}), 500
 
-# === Запуск локально (если нужно) ===
+# === Запуск ===
 if __name__ == "__main__":
     try:
         bot.remove_webhook()
