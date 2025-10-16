@@ -8,9 +8,9 @@ const user_id = parseInt(params.get("user_id"));
 const app = document.getElementById("content");
 
 // === Константы синхронизации ===
-const POLL_INTERVAL_MS = 3000;     // редкий фоновый опрос при активном раунде
-const DEADLINE_SLOP_MS = 300;      // фора к дедлайну
-const LOCAL_TIMER_MS = 250;        // частота мягкого обновления прогресс-бара
+const POLL_INTERVAL_MS = 3000;
+const DEADLINE_SLOP_MS = 300;
+const LOCAL_TIMER_MS = 250;
 
 let lastState = null;
 let lastRev = null;
@@ -19,6 +19,8 @@ let lastAbort = null;
 let pollTimer = null;
 let deadlineTimer = null;
 let localTimer = null;
+let rematchTimer = null;
+
 let pendingAction = false;
 let chosenTimer = 30; // дефолт до сохранения админом
 
@@ -28,6 +30,13 @@ function fmtSec(s) {
   const m = Math.floor(s/60);
   const r = s%60;
   return m>0 ? `${m}:${String(r).padStart(2,"0")}` : `${r}с`;
+}
+
+function setBackground(url){
+  if (!url) return;
+  document.body.style.backgroundImage = `url("${url}")`;
+  document.body.style.backgroundSize = "cover";
+  document.body.style.backgroundPosition = "center";
 }
 
 function renderErrorInit() {
@@ -112,11 +121,18 @@ async function postJSON(url, body){
   });
   return res.json();
 }
+async function apiRematchState(){
+  const res = await fetch(`/api/rematch/state?chat_id=${chat_id}&user_id=${user_id}`);
+  return res.json();
+}
 
 function renderAdmin(state){
   const rnd = state.round;
   const q = state.question;
   const playersCount = Object.keys(state.players||{}).length;
+
+  // показываем "Начать квиз / вопрос" только если ещё НЕ было первого раунда
+  const showStart = !state.round;
 
   const controls = `
     <div class="p-3 bg-purple-900 rounded-lg space-y-2">
@@ -127,8 +143,8 @@ function renderAdmin(state){
         `).join("")}
       </div>
       ${buttonPrimary("saveTimer","💾 Сохранить таймер", pendingAction)}
-      <div class="grid grid-cols-3 gap-2 pt-2">
-        ${buttonPrimary("startRound","▶ Начать квиз / вопрос", pendingAction)}
+      <div class="grid grid-cols-2 gap-2 pt-2">
+        ${showStart ? buttonPrimary("startRound","▶ Начать квиз / вопрос", pendingAction) : ""}
         ${buttonGhost("nextRound","⏭ Следующий вопрос", pendingAction || !state.round || !state.round.finished)}
         ${buttonGhost("endQuiz","🛑 Завершить квиз", pendingAction)}
       </div>
@@ -159,6 +175,8 @@ function renderAdmin(state){
         Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
       </div>
     `;
+    // динамический фон
+    if (q.image) setBackground(q.image);
   }
 
   app.innerHTML = `
@@ -187,7 +205,6 @@ function renderAdmin(state){
   const startBtn = document.getElementById("startRound");
   if (startBtn) startBtn.onclick = async ()=>{
     pendingAction = true; renderAdmin(state);
-    // если таймер ещё не выставлен — подсейвим автоматически
     if (!lastState?.timer_seconds){
       const c = await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer});
       if (!c.ok){ pendingAction = false; return; }
@@ -214,8 +231,8 @@ function renderAdmin(state){
     if (r.ok) {
       stopPolling();
       stopLocalTimer();
-      lastState = {...(lastState||{}), finalBoard: r.leaderboard || []};
       renderFinalBoard(r.leaderboard || []);
+      startRematchWatch(); // сразу начинаем монитор рематча
     } else {
       getState({soft:false});
     }
@@ -225,9 +242,9 @@ function renderAdmin(state){
     b.onclick = (e)=> submitAnswer(e);
   });
 
-  // локальный таймер (без перерендера)
   if (state.round && !state.round.finished){
     startLocalTimer(state.round.deadline, state.timer_seconds || 1);
+    if (state.question?.image) setBackground(state.question.image);
   } else {
     stopLocalTimer();
   }
@@ -265,6 +282,8 @@ function renderPlayer(state){
     </div>
   `;
 
+  if (q.image) setBackground(q.image);
+
   document.querySelectorAll(".option").forEach(b=>{
     b.onclick = (e)=> submitAnswer(e);
   });
@@ -278,17 +297,8 @@ function renderPlayer(state){
 
 function renderFinalBoard(board){
   stopLocalTimer();
-  if (!board || board.length===0){
-    app.innerHTML = `
-      <div class="text-center">
-        <p class="text-xl mb-2">Квиз завершён!</p>
-        <p>Участников не было 🤷‍♂️</p>
-      </div>
-    `;
-    return;
-  }
   const medals = ["🥇","🥈","🥉"];
-  const rows = board.map((it, idx)=>`
+  const rows = (board||[]).map((it, idx)=>`
     <div class="flex items-center justify-between py-2 px-3 bg-purple-900/50 rounded-lg">
       <div>${medals[idx] || "🎖️"}</div>
       <div class="font-semibold">${it.name}</div>
@@ -297,11 +307,69 @@ function renderFinalBoard(board){
     </div>
   `).join("");
 
+  const joinBtn = buttonPrimary("rematchJoin","🔁 Участвовать ещё раз");
+  const adminPanel = `
+    <div id="rematchAdmin" class="mt-4 p-3 bg-purple-900 rounded-lg hidden">
+      <div class="text-sm mb-2">Подтвердили участие:</div>
+      <div id="rematchList" class="space-y-1 text-sm"></div>
+      <div class="mt-3">${buttonGhost("rematchStart","🚀 Перезапустить квиз")}</div>
+    </div>
+  `;
+
   app.innerHTML = `
     <h2 class="text-xl mb-4">🏁 Итоги квиза</h2>
-    <div class="space-y-2">${rows}</div>
-    <div class="mt-4 text-sm text-gray-300">При равенстве очков победил(и) тот(те), кто затратил меньше суммарного времени.</div>
+    <div class="space-y-2">${rows || "<div>Участников не было 🤷‍♂️</div>"}</div>
+    <div class="mt-6">${joinBtn}</div>
+    ${adminPanel}
   `;
+
+  // кнопка "участвовать ещё раз" — доступна всем
+  document.getElementById("rematchJoin").onclick = async ()=>{
+    const name = tg?.initDataUnsafe?.user?.first_name || "Игрок";
+    const r = await postJSON("/api/rematch/join", {chat_id, user_id, name});
+    if (r.ok){
+      // если мы админ — сразу обновим список
+      updateRematchAdminUI();
+    }
+  };
+
+  // если мы админ — показываем панель и список
+  updateRematchAdminUI(true);
+}
+
+async function updateRematchAdminUI(forceShow=false){
+  const data = await apiRematchState();
+  const box = document.getElementById("rematchAdmin");
+  if (!box) return;
+  if (!data.ok) { box.classList.add("hidden"); return; }
+  if (forceShow || data.admin_id === user_id){
+    box.classList.remove("hidden");
+  } else {
+    box.classList.add("hidden");
+  }
+  const list = document.getElementById("rematchList");
+  if (list){
+    const items = Object.values(data.confirmed || {});
+    list.innerHTML = items.length ? items.map(n=>`<div>• ${n}</div>`).join("") : "<div>— пока никто</div>";
+  }
+  const startBtn = document.getElementById("rematchStart");
+  if (startBtn){
+    startBtn.onclick = async ()=>{
+      const r = await postJSON("/api/rematch/start", {chat_id, user_id});
+      if (r.ok){
+        // Начинаем новую игру: просто тянем состояние
+        renderLoading("Запуск новой игры…");
+        // сброс фонового рематч-пула
+        if (rematchTimer){ clearInterval(rematchTimer); rematchTimer=null; }
+        getState({soft:false});
+      }
+    };
+  }
+}
+
+function startRematchWatch(){
+  if (rematchTimer) clearInterval(rematchTimer);
+  rematchTimer = setInterval(updateRematchAdminUI, 2000);
 }
 
 // --- Синхронизация состояния ---
@@ -317,8 +385,14 @@ async function getState(opts={}){
     if (data.ended){
       stopPolling();
       stopLocalTimer();
-      if (lastState?.finalBoard) renderFinalBoard(lastState.finalBoard);
-      else renderLoading("Квиз завершён.");
+      // попробуем показать статус рематча (если есть)
+      const rs = await apiRematchState();
+      if (rs.ok){
+        renderFinalBoard(rs.leaderboard || []);
+        startRematchWatch();
+      } else {
+        renderLoading("Квиз завершён.");
+      }
       return;
     }
     if (!data.ok){ renderLoading("Игра не найдена."); return; }
