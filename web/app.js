@@ -7,32 +7,45 @@ const user_id = parseInt(params.get("user_id"));
 
 const app = document.getElementById("content");
 
+// === Константы синхронизации ===
+const POLL_INTERVAL_MS = 3000;     // редкий фоновый опрос при активном раунде
+const DEADLINE_SLOP_MS = 300;      // фора к дедлайну
+const LOCAL_TIMER_MS = 250;        // частота мягкого обновления прогресс-бара
+
 let lastState = null;
 let lastRev = null;
 let inFlight = false;
 let lastAbort = null;
 let pollTimer = null;
 let deadlineTimer = null;
+let localTimer = null;
 let pendingAction = false;
 let chosenTimer = 30; // дефолт до сохранения админом
 
 function nowSec() { return Date.now()/1000; }
-
 function fmtSec(s) {
   s = Math.max(0, Math.floor(s));
   const m = Math.floor(s/60);
   const r = s%60;
-  if (m>0) return `${m}:${String(r).padStart(2,"0")}`;
-  return `${r}с`;
+  return m>0 ? `${m}:${String(r).padStart(2,"0")}` : `${r}с`;
+}
+
+function renderErrorInit() {
+  app.innerHTML = `
+    <div class="text-center">
+      <p class="text-xl mb-2">Неверные параметры запуска.</p>
+      <p class="text-sm text-gray-300">Пожалуйста, откройте квиз через кнопку в личных сообщениях бота.</p>
+    </div>
+  `;
 }
 
 function progressBar(remain, total) {
   const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
   return `
     <div class="w-full bg-purple-900/50 rounded-full h-3">
-      <div class="h-3 rounded-full bg-purple-400 transition-all" style="width:${pct}%"></div>
+      <div id="timerBar" class="h-3 rounded-full bg-purple-400 transition-all" style="width:${pct}%"></div>
     </div>
-    <div class="text-xs text-gray-300 mt-1">Осталось: ${fmtSec(remain)}</div>
+    <div id="timerRemain" class="text-xs text-gray-300 mt-1">Осталось: ${fmtSec(remain)}</div>
   `;
 }
 
@@ -54,7 +67,7 @@ function renderLoading(msg="Загрузка..."){
   app.innerHTML = `<p class="text-lg">${msg}</p>`;
 }
 
-function startPolling(intervalMs=3000){
+function startPolling(intervalMs=POLL_INTERVAL_MS){
   if (pollTimer) return;
   pollTimer = setInterval(()=> getState({soft:true}), intervalMs);
 }
@@ -63,8 +76,23 @@ function stopPolling(){
 }
 function setDeadlineTimer(deadline){
   if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
-  const delay = Math.max(0, (deadline - nowSec())*1000 + 300);
+  const delay = Math.max(0, (deadline - nowSec())*1000 + DEADLINE_SLOP_MS);
   deadlineTimer = setTimeout(()=> getState({soft:true}), delay);
+}
+function startLocalTimer(deadline, total){
+  stopLocalTimer();
+  localTimer = setInterval(()=>{
+    const remain = Math.max(0, deadline - nowSec());
+    const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
+    const bar = document.getElementById("timerBar");
+    const rem = document.getElementById("timerRemain");
+    if (bar) bar.style.width = `${pct}%`;
+    if (rem) rem.textContent = `Осталось: ${fmtSec(remain)}`;
+    if (remain <= 0) stopLocalTimer();
+  }, LOCAL_TIMER_MS);
+}
+function stopLocalTimer(){
+  if (localTimer){ clearInterval(localTimer); localTimer = null; }
 }
 
 function isAnswered(state){
@@ -90,7 +118,6 @@ function renderAdmin(state){
   const q = state.question;
   const playersCount = Object.keys(state.players||{}).length;
 
-  // Контролы админа
   const controls = `
     <div class="p-3 bg-purple-900 rounded-lg space-y-2">
       <div class="text-sm text-gray-300">Таймер вопроса (сек):</div>
@@ -160,7 +187,12 @@ function renderAdmin(state){
   const startBtn = document.getElementById("startRound");
   if (startBtn) startBtn.onclick = async ()=>{
     pendingAction = true; renderAdmin(state);
-    const r = await postJSON("/api/admin/start", {chat_id, user_id});
+    // если таймер ещё не выставлен — подсейвим автоматически
+    if (!lastState?.timer_seconds){
+      const c = await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer});
+      if (!c.ok){ pendingAction = false; return; }
+    }
+    const r = await postJSON("/api/admin/start", {chat_id, user_id, timer_seconds: chosenTimer});
     pendingAction = false;
     if (r.ok) getState({soft:false});
   };
@@ -181,6 +213,7 @@ function renderAdmin(state){
     pendingAction = false;
     if (r.ok) {
       stopPolling();
+      stopLocalTimer();
       lastState = {...(lastState||{}), finalBoard: r.leaderboard || []};
       renderFinalBoard(r.leaderboard || []);
     } else {
@@ -191,6 +224,13 @@ function renderAdmin(state){
   document.querySelectorAll(".option").forEach(b=>{
     b.onclick = (e)=> submitAnswer(e);
   });
+
+  // локальный таймер (без перерендера)
+  if (state.round && !state.round.finished){
+    startLocalTimer(state.round.deadline, state.timer_seconds || 1);
+  } else {
+    stopLocalTimer();
+  }
 }
 
 function renderPlayer(state){
@@ -203,9 +243,9 @@ function renderPlayer(state){
       <div class="text-center">
         <p class="text-xl mb-2">⏳ Ждём начала вопроса...</p>
         <div class="text-sm text-gray-300">Игроков: ${playersCount}</div>
-        <button onclick="getState({soft:false})" class="mt-4 py-2 px-4 bg-blue-600 rounded-lg">🔄 Обновить</button>
       </div>
     `;
+    stopLocalTimer();
     return;
   }
 
@@ -228,9 +268,16 @@ function renderPlayer(state){
   document.querySelectorAll(".option").forEach(b=>{
     b.onclick = (e)=> submitAnswer(e);
   });
+
+  if (state.round && !state.round.finished){
+    startLocalTimer(state.round.deadline, state.timer_seconds || 1);
+  } else {
+    stopLocalTimer();
+  }
 }
 
 function renderFinalBoard(board){
+  stopLocalTimer();
   if (!board || board.length===0){
     app.innerHTML = `
       <div class="text-center">
@@ -257,7 +304,7 @@ function renderFinalBoard(board){
   `;
 }
 
-// --- Синхронизация состояния (событийная + редкий опрос) ---
+// --- Синхронизация состояния ---
 async function getState(opts={}){
   if (inFlight) return;
   try{
@@ -269,26 +316,24 @@ async function getState(opts={}){
 
     if (data.ended){
       stopPolling();
+      stopLocalTimer();
       if (lastState?.finalBoard) renderFinalBoard(lastState.finalBoard);
       else renderLoading("Квиз завершён.");
       return;
     }
     if (!data.ok){ renderLoading("Игра не найдена."); return; }
 
-    // обновление по ревизии: чтобы убрать «мигание»
     if (data.rev !== lastRev || !opts.soft){
       lastRev = data.rev;
       lastState = data;
 
-      // управляем фоновым опросом
-      if (data.round && !data.round.finished) startPolling(3000);
+      if (data.round && !data.round.finished) startPolling(POLL_INTERVAL_MS);
       else stopPolling();
 
-      // одиночный будильник на дедлайн
       if (data.round && !data.round.finished){
         setDeadlineTimer(data.round.deadline);
-      }else if (deadlineTimer){
-        clearTimeout(deadlineTimer); deadlineTimer=null;
+      }else{
+        if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
       }
 
       if (data.role === "admin") renderAdmin(data);
@@ -304,7 +349,6 @@ async function getState(opts={}){
 async function submitAnswer(e){
   const idx = parseInt(e.target.dataset.idx);
   if (isNaN(idx)) return;
-  // оптимистически блокируем варианты
   document.querySelectorAll(".option").forEach(b=>b.setAttribute("disabled","disabled"));
   try{
     const r = await postJSON("/api/submit", {
@@ -319,5 +363,10 @@ async function submitAnswer(e){
   }
 }
 
-// Первый запрос состояния
-getState({soft:false});
+// --- Точка входа ---
+if (Number.isNaN(chat_id) || Number.isNaN(user_id)) {
+  renderErrorInit();
+} else {
+  renderLoading();
+  getState({soft:false});
+}
