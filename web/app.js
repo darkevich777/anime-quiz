@@ -1,4 +1,4 @@
-// ===== Mini App — отсчёт 3..2..1 с предзагрузкой фона =====
+// ===== Mini App — стабильный отсчёт 3..2..1, синхронизированный с сервером =====
 const tg = window.Telegram.WebApp;
 tg.expand();
 
@@ -13,6 +13,8 @@ const POLL_INTERVAL_MS = 3000;
 const DEADLINE_SLOP_MS = 300;
 const LOCAL_TIMER_MS = 250;
 const COUNTDOWN_SEC = 3;
+const COUNTDOWN_SKIP_THRESHOLD = 0.2;  // если до конца отсчёта < 0.2с — сразу показываем вопрос
+const PRELOAD_WAIT_CAP_MS = 800;       // максимально ждём предзагрузку после отсчёта
 const OPTIONS_MIN_HEIGHT_PX = 260;
 
 let lastState = null;
@@ -29,11 +31,12 @@ let currentBg = null; // текущий фон
 
 // --- состояние отсчёта и предзагрузки ---
 let countdownActive = false;
-let countdownEndTs = 0;
+let countdownEndTs = 0;                 // серверный started_at + COUNTDOWN_SEC
 let countdownRaf = null;
+let countdownHardTimeout = null;        // жёсткий фолбэк
 let nextQImageUrl = null;
 let nextQImageReady = false;
-let pendingQuestionStartedAt = null; // started_at для которого идёт отсчёт
+let countingStartedAt = null;           // started_at для которого идёт отсчёт
 
 // ---------- Утилиты ----------
 function nowSec(){ return Date.now()/1000; }
@@ -44,7 +47,7 @@ function fmtSec(s){
 }
 function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
 
-// Стартовый фон (как до начала квиза)
+// Стартовый фон
 function resetBackgroundToDefault(){
   currentBg = null;
   document.documentElement.style.setProperty('background-image', 'none', 'important');
@@ -126,7 +129,7 @@ async function apiRematchState(){
   return res.json();
 }
 
-// ---------- Общие виджеты ----------
+// ---------- Виджеты ----------
 function progressBar(remain, total){
   const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
   return `
@@ -156,7 +159,6 @@ function isAnswered(state){
 
 // ---------- Экран отсчёта ----------
 function showCountdownScreen(){
-  // простой отдельный экран, чтобы не мешать предыдущему вопросу
   app.innerHTML = `
     <div class="flex items-center justify-center" style="min-height:60vh">
       <div class="text-center">
@@ -166,25 +168,42 @@ function showCountdownScreen(){
     </div>
   `;
 }
+function clearCountdown(){
+  countdownActive = false;
+  countingStartedAt = null;
+  if (countdownRaf) cancelAnimationFrame(countdownRaf);
+  countdownRaf = null;
+  if (countdownHardTimeout) clearTimeout(countdownHardTimeout);
+  countdownHardTimeout = null;
+}
 function startCountdownForQuestion(startedAt, imageUrl){
-  // уже запущен для этого startedAt — игнор
-  if (countdownActive && pendingQuestionStartedAt === startedAt) return;
+  // если уже крутится именно для этого startedAt — выходим
+  if (countdownActive && countingStartedAt === startedAt) return;
+
+  // если до конца «идеального» отсчёта меньше 0.2с — пропускаем отсчёт
+  const serverEnd = startedAt + COUNTDOWN_SEC;
+  if (serverEnd - nowSec() <= COUNTDOWN_SKIP_THRESHOLD){
+    // фон всё равно предзагрузим и ставим сразу
+    preloadImage(imageUrl).then(()=>{ if (imageUrl) setBackground(imageUrl); });
+    return;
+  }
 
   countdownActive = true;
-  pendingQuestionStartedAt = startedAt;
-  countdownEndTs = nowSec() + COUNTDOWN_SEC;
+  countingStartedAt = startedAt;
+  countdownEndTs = serverEnd;
   nextQImageUrl = imageUrl || null;
   nextQImageReady = false;
 
-  // предзагрузка картинки
+  // предзагрузка
   preloadImage(nextQImageUrl).then(ok => { nextQImageReady = ok || !imageUrl; });
 
-  // сбрасываем фон на базовый на время отсчёта:
+  // сбрасываем фон на время отсчёта
   resetBackgroundToDefault();
   showCountdownScreen();
 
+  // «мягкие» тики рендера (rAF)
   const tick = ()=>{
-    if (!countdownActive || pendingQuestionStartedAt !== startedAt) return; // отменён
+    if (!countdownActive || countingStartedAt !== startedAt) return;
     const left = Math.ceil(countdownEndTs - nowSec());
     const el = document.getElementById("cdVal");
     if (el) el.textContent = String(Math.max(0, left));
@@ -195,16 +214,20 @@ function startCountdownForQuestion(startedAt, imageUrl){
     }
   };
   countdownRaf = requestAnimationFrame(tick);
+
+  // Жёсткий фолбэк на случай «замирания» таймеров/кадров
+  countdownHardTimeout = setTimeout(()=>{
+    if (countdownActive && countingStartedAt === startedAt) finishCountdownAndShowQuestion();
+  }, (serverEnd - nowSec())*1000 + PRELOAD_WAIT_CAP_MS);
 }
 function finishCountdownAndShowQuestion(){
-  // ждём предзагрузку максимум 500мс, чтобы отрисовать синхронно
-  const waitUntil = Date.now() + 500;
+  const waitUntil = Date.now() + PRELOAD_WAIT_CAP_MS;
   const waitLoop = ()=>{
+    if (!countdownActive) return; // уже снято где-то
     if (nextQImageReady || Date.now() > waitUntil){
       if (nextQImageUrl) setBackground(nextQImageUrl);
-      countdownActive = false;
-      pendingQuestionStartedAt = null;
-      // сразу перерисовываем актуальное состояние
+      clearCountdown();
+      // перерисовываем актуальный вопрос
       getState({soft:false});
     } else {
       setTimeout(waitLoop, 50);
@@ -242,6 +265,13 @@ function renderAdmin(state){
     </div>
   `;
 
+  // если идёт отсчёт — показываем только экран отсчёта
+  if (countdownActive){
+    app.innerHTML = `<h2 class="text-xl mb-4">👑 Панель администратора</h2>${timerBlock}${controls}`;
+    showCountdownScreen();
+    return;
+  }
+
   let body = "";
   if (!q){
     body = `
@@ -251,12 +281,6 @@ function renderAdmin(state){
       </div>
     `;
   } else {
-    // если идёт отсчёт — отсюда не рисуем вопрос (он отрисуется после finishCountdown…)
-    if (countdownActive) {
-      showCountdownScreen();
-      return;
-    }
-
     const remain = Math.max(0, (rnd?.deadline||0) - nowSec());
     const total = (state.timer_seconds||1);
     const finished = !!(state.round && state.round.finished && typeof q.answer === "number");
@@ -273,6 +297,7 @@ function renderAdmin(state){
         Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
       </div>
     `;
+    if (q.image) setBackground(q.image);
   }
 
   app.innerHTML = `
@@ -351,6 +376,11 @@ function renderPlayer(state){
   const rnd = state.round, q = state.question;
   const playersCount = Object.keys(state.players||{}).length;
 
+  if (countdownActive){
+    showCountdownScreen();
+    return;
+  }
+
   if (!q){
     app.innerHTML = `
       <div class="text-center">
@@ -359,11 +389,6 @@ function renderPlayer(state){
       </div>
     `;
     stopLocalTimer();
-    return;
-  }
-
-  if (countdownActive){
-    showCountdownScreen();
     return;
   }
 
@@ -488,15 +513,13 @@ async function getState(opts={}){
     }
     if (!data.ok){ renderLoading("Игра не найдена."); return; }
 
-    // детект нового вопроса: сравниваем started_at
+    // детект нового вопроса
     const startedAt = data.round?.started_at;
     const newQuestion = startedAt && (!lastState?.round || startedAt !== lastState.round.started_at);
 
-    // если пришёл новый вопрос и отсчёт ещё не идёт — запускаем отсчёт и предзагрузку
-    if (newQuestion && !countdownActive){
-      // заранее сохраняем url картинки
-      nextQImageUrl = data.question?.image || null;
-      startCountdownForQuestion(startedAt, nextQImageUrl);
+    if (newQuestion){
+      const imgUrl = data.question?.image || null;
+      startCountdownForQuestion(startedAt, imgUrl);
     }
 
     // обновляем локальное состояние и таймеры
@@ -510,13 +533,11 @@ async function getState(opts={}){
       if (data.round && !data.round.finished) setDeadlineTimer(data.round.deadline);
       else if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
 
-      // если отсчёт активен — рисуем экран отсчёта, иначе обычный рендер
       if (countdownActive){
         showCountdownScreen();
       } else {
         if (data.role === "admin") renderAdmin(data);
         else renderPlayer(data);
-        // если у отображаемого вопроса есть картинка и мы не в отсчёте — ставим фон
         if (data.question?.image) setBackground(data.question.image);
       }
     }
