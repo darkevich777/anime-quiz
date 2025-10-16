@@ -35,15 +35,23 @@ function fmtSec(s){
 }
 function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
 
-// Надёжная смена фона (без затемнения, без «чёрного экрана»)
 function setBackground(url){
   if (!url || url === currentBg) return;
   const img = new Image();
   img.onload = () => {
     currentBg = url;
-    // ставим фон и на body, и на html на всякий случай
-    document.documentElement.style.background = `url("${url}") center / cover no-repeat fixed`;
-    document.body.style.background = `url("${url}") center / cover no-repeat fixed`;
+    // Жёстко проставляем инлайн-стили с приоритетом !important — чтобы точно перекрыть любые CSS-правила
+    document.documentElement.style.setProperty('background-image', `url("${url}")`, 'important');
+    document.documentElement.style.setProperty('background-repeat', 'no-repeat', 'important');
+    document.documentElement.style.setProperty('background-position', 'center', 'important');
+    document.documentElement.style.setProperty('background-size', 'cover', 'important');
+    document.documentElement.style.setProperty('background-attachment', 'fixed', 'important');
+
+    document.body.style.setProperty('background-image', `url("${url}")`, 'important');
+    document.body.style.setProperty('background-repeat', 'no-repeat', 'important');
+    document.body.style.setProperty('background-position', 'center', 'important');
+    document.body.style.setProperty('background-size', 'cover', 'important');
+    document.body.style.setProperty('background-attachment', 'fixed', 'important');
   };
   img.src = url;
 }
