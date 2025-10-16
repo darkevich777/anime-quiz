@@ -151,7 +151,18 @@ def generate_question():
 
 # === Состояние игры ===
 game_states = {}
-# структура описана ранее
+# game_states[chat_id] = {
+#   players: { uid: { name, answered, dm_ok, total_time, last_answer_time } },
+#   scores: { uid: int },
+#   admin_id: int|None,
+#   quiz_started: bool,
+#   locked: bool,
+#   timer_seconds: int|None,
+#   rounds_total: int,
+#   rounds_played: int,
+#   round: { q, started_at, deadline, finished } | None,
+#   rev: int
+# }
 
 # Отдельно — состояние «рематча»
 # chat_id: { admin_id: int, confirmed: {uid: name}, leaderboard: [...], created_at: float }
@@ -166,6 +177,8 @@ def ensure_chat_state(chat_id):
             "quiz_started": False,
             "locked": False,
             "timer_seconds": None,
+            "rounds_total": 10,   # по умолчанию
+            "rounds_played": 0,
             "round": None,
             "rev": 0
         }
@@ -212,7 +225,7 @@ def compute_leaderboard(gs):
 def medals_for_position(pos):
     return ["🥇", "🥈", "🥉"][pos] if pos < 3 else "🎖️"
 
-# === Команды бота === (register/status/quiz/start) — без изменений логики, опущено ради краткости
+# === Команды бота ===
 @bot.message_handler(commands=['start'])
 def start_cmd(msg):
     text = (msg.text or "").strip()
@@ -335,6 +348,8 @@ def current_state_payload(gs, chat_id, user_id):
         "quiz_started": gs["quiz_started"],
         "locked": gs["locked"],
         "timer_seconds": gs["timer_seconds"],
+        "rounds_total": gs.get("rounds_total", 10),
+        "rounds_played": gs.get("rounds_played", 0),
         "admin_id": gs["admin_id"],
         "question": None,
         "round": None,
@@ -374,12 +389,21 @@ def admin_config():
         chat_id = int(data["chat_id"])
         user_id = int(data["user_id"])
         timer_seconds = int(data["timer_seconds"])
+        rounds_total = int(data.get("rounds_total", 10))
+
         gs = game_states.get(chat_id)
         if not gs or gs["admin_id"] != user_id:
             return jsonify({"ok": False, "error": "not admin"}), 403
+
         gs["timer_seconds"] = max(MIN_TIMER, min(MAX_TIMER, timer_seconds))
+
+        allowed_rounds = {10, 15, 20, 30}
+        if rounds_total not in allowed_rounds:
+            rounds_total = 10
+        gs["rounds_total"] = rounds_total
+
         bump_rev(gs)
-        return jsonify({"ok": True, "timer_seconds": gs["timer_seconds"]})
+        return jsonify({"ok": True, "timer_seconds": gs["timer_seconds"], "rounds_total": gs["rounds_total"]})
     except Exception as e:
         print(f"❌ /api/admin/config error: {e}")
         return jsonify({"ok": False}), 500
@@ -403,10 +427,12 @@ def admin_start_round():
                 val = 30
             gs["timer_seconds"] = max(MIN_TIMER, min(MAX_TIMER, val))
 
+        # старт первого раунда
         q = generate_question()
         started_at = time.time()
         deadline = started_at + gs["timer_seconds"]
         gs["round"] = {"q": q, "started_at": started_at, "deadline": deadline, "finished": False}
+        gs["rounds_played"] = 1  # первый раунд начался
         for p in gs["players"].values():
             p["answered"] = False
             p["last_answer_time"] = None
@@ -429,10 +455,46 @@ def admin_next():
         if gs["round"] and not gs["round"]["finished"]:
             finalize_round_if_needed(gs, chat_id)
 
+        # Проверка лимита — если уже сыграли нужное количество, завершаем квиз
+        played = gs.get("rounds_played", 0)
+        total = gs.get("rounds_total", 10)
+        if played >= total:
+            board = compute_leaderboard(gs)
+
+            lines = ["🏁 *Квиз завершён!* Итоговый лидерборд:"]
+            if not board:
+                lines.append("— никого нет в таблице 😅")
+            else:
+                score_groups = {}
+                for _, name, score, ttime in board:
+                    score_groups.setdefault(score, []).append((name, ttime))
+                for i, (uid, name, score, ttime) in enumerate(board):
+                    medal = medals_for_position(i)
+                    addon = f" — по времени: {ttime:.2f} сек" if len(score_groups[score]) > 1 else ""
+                    lines.append(f"{medal} *{name}* — {score} балл(ов){addon}")
+            try:
+                bot.send_message(chat_id, "\n".join(lines))
+            except Exception:
+                pass
+
+            rematch_states[chat_id] = {
+                "admin_id": gs["admin_id"],
+                "confirmed": {},
+                "leaderboard": [
+                    {"user_id": uid, "name": name, "score": score, "total_time": ttime}
+                    for uid, name, score, ttime in board
+                ],
+                "created_at": time.time()
+            }
+            game_states.pop(chat_id, None)
+            return jsonify({"ok": True, "ended": True, "leaderboard": rematch_states[chat_id]["leaderboard"]})
+
+        # Иначе запускаем следующий раунд
         q = generate_question()
         started_at = time.time()
         deadline = started_at + (gs["timer_seconds"] or 30)
         gs["round"] = {"q": q, "started_at": started_at, "deadline": deadline, "finished": False}
+        gs["rounds_played"] = played + 1
         for p in gs["players"].values():
             p["answered"] = False
             p["last_answer_time"] = None
@@ -457,7 +519,7 @@ def admin_end():
 
         board = compute_leaderboard(gs)
 
-        # Отправка итогов в группу (как раньше)
+        # Отправка итогов в группу
         lines = ["🏁 *Квиз завершён!* Итоговый лидерборд:"]
         if not board:
             lines.append("— никого нет в таблице 😅")
@@ -559,6 +621,21 @@ def rematch_join():
         print(f"❌ /api/rematch/join error: {e}")
         return jsonify({"ok": False}), 500
 
+@app.route("/api/rematch/leave", methods=["POST"])
+def rematch_leave():
+    try:
+        data = request.get_json(force=True)
+        chat_id = int(data["chat_id"])
+        user_id = int(data["user_id"])
+        rs = rematch_states.get(chat_id)
+        if not rs:
+            return jsonify({"ok": False}), 400
+        rs["confirmed"].pop(str(user_id), None)
+        return jsonify({"ok": True, "confirmed": rs["confirmed"]})
+    except Exception as e:
+        print(f"❌ /api/rematch/leave error: {e}")
+        return jsonify({"ok": False}), 500
+
 @app.route("/api/rematch/start", methods=["POST"])
 def rematch_start():
     try:
@@ -582,6 +659,8 @@ def rematch_start():
         gs["quiz_started"] = True
         gs["locked"] = True
         gs["timer_seconds"] = None
+        gs["rounds_total"] = gs.get("rounds_total", 10)  # останется прежним, если нужно — админ поменяет в веб-аппе
+        gs["rounds_played"] = 0
         gs["round"] = None
         bump_rev(gs)
 
