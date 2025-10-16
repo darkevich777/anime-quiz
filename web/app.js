@@ -1,3 +1,4 @@
+// ===== Mini App (чистая, без затемнения и отсчётов) =====
 const tg = window.Telegram.WebApp;
 tg.expand();
 
@@ -11,7 +12,6 @@ const app = document.getElementById("content");
 const POLL_INTERVAL_MS = 3000;
 const DEADLINE_SLOP_MS = 300;
 const LOCAL_TIMER_MS = 250;
-const COUNTDOWN_SEC = 3;
 const OPTIONS_MIN_HEIGHT_PX = 260;
 
 let lastState = null;
@@ -23,78 +23,83 @@ let deadlineTimer = null;
 let localTimer = null;
 let rematchTimer = null;
 
-let pendingAction = false;
 let chosenTimer = 30;
+let currentBg = null; // текущий загруженный фон
 
-let countdownUntil = null;      // unix-секунды до конца отсчёта
-let countdownTicker = null;     // requestAnimationFrame id
-let currentBg = null;           // текущий фон
-
-// ===== Утилиты =====
+// ---------- Утилиты ----------
 function nowSec(){ return Date.now()/1000; }
 function fmtSec(s){
   s = Math.max(0, Math.floor(s));
   const m = Math.floor(s/60), r = s%60;
   return m>0 ? `${m}:${String(r).padStart(2,"0")}` : `${r}с`;
 }
+function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
 
-// Лёгкий оверлей и сетевой бэйдж
-let netBadge = null;
-function ensureOverlay(){
-  if (!document.getElementById("bg-shade")){
-    const shade = document.createElement("div");
-    shade.id = "bg-shade";
-    Object.assign(shade.style, {
-      position:"fixed", inset:"0", pointerEvents:"none",
-      // было слишком темно — делаем легче
-      background: "linear-gradient(180deg, rgba(0,0,0,.22) 0%, rgba(0,0,0,.38) 100%)",
-      zIndex:"0"
-    });
-    document.body.appendChild(shade);
-  }
-  if (!netBadge){
-    netBadge = document.createElement("div");
-    netBadge.id = "net-badge";
-    netBadge.textContent = "Проблемы со связью…";
-    Object.assign(netBadge.style, {
-      position:"fixed", top:"8px", right:"8px",
-      background:"rgba(255,255,255,.08)",
-      border:"1px solid rgba(255,255,255,.18)",
-      backdropFilter:"blur(6px)",
-      padding:"6px 10px", borderRadius:"10px",
-      fontSize:"12px", color:"#fff",
-      opacity:"0", transition:"opacity .2s ease",
-      zIndex:"1000", pointerEvents:"none"
-    });
-    document.body.appendChild(netBadge);
-  }
-}
-function showNetBadge(on){ if (netBadge) netBadge.style.opacity = on ? "1" : "0"; }
-
-// Надёжная смена фона (с предзагрузкой)
+// Надёжная смена фона (без затемнения, без «чёрного экрана»)
 function setBackground(url){
-  ensureOverlay();
-  if (!url) return;                 // без url — оставляем прежний фон
-  if (url === currentBg) return;    // тот же — ничего не делаем
+  if (!url || url === currentBg) return;
   const img = new Image();
   img.onload = () => {
     currentBg = url;
-    document.body.style.backgroundImage = `url("${url}")`;
-    document.body.style.backgroundSize = "cover";
-    document.body.style.backgroundPosition = "center";
-    document.body.style.backgroundAttachment = "fixed";
-    document.body.style.backgroundRepeat = "no-repeat";
+    // ставим фон и на body, и на html на всякий случай
+    document.documentElement.style.background = `url("${url}") center / cover no-repeat fixed`;
+    document.body.style.background = `url("${url}") center / cover no-repeat fixed`;
   };
   img.src = url;
 }
 
+// ---------- Таймеры ----------
+function startPolling(i=POLL_INTERVAL_MS){ if (!pollTimer) pollTimer = setInterval(()=>getState({soft:true}), i); }
+function stopPolling(){ if (pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
+
+function setDeadlineTimer(deadline){
+  if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
+  const delay = Math.max(0, (deadline - nowSec())*1000 + DEADLINE_SLOP_MS);
+  deadlineTimer = setTimeout(()=> getState({soft:true}), delay);
+}
+
+function startLocalTimer(deadline, total){
+  stopLocalTimer();
+  localTimer = setInterval(()=>{
+    const remain = Math.max(0, deadline - nowSec());
+    const bar = document.getElementById("timerBar");
+    const rem = document.getElementById("timerRemain");
+    if (bar){
+      const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
+      bar.style.width = `${pct}%`;
+    }
+    if (rem) rem.textContent = `Осталось: ${fmtSec(remain)}`;
+    if (remain <= 0) stopLocalTimer();
+  }, LOCAL_TIMER_MS);
+}
+function stopLocalTimer(){ if (localTimer){ clearInterval(localTimer); localTimer=null; } }
+
+// ---------- API ----------
+async function apiGetState(signal){
+  const res = await fetch(`/api/get_state?chat_id=${chat_id}&user_id=${user_id}`, { signal });
+  return res.json();
+}
+async function postJSON(url, body){
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+async function apiRematchState(){
+  const res = await fetch(`/api/rematch/state?chat_id=${chat_id}&user_id=${user_id}`);
+  return res.json();
+}
+
+// ---------- Общие виджеты ----------
 function progressBar(remain, total){
   const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
   return `
     <div class="w-full bg-purple-900/40 rounded-full h-3">
       <div id="timerBar" class="h-3 rounded-full bg-purple-400 transition-all" style="width:${pct}%"></div>
     </div>
-    <div id="timerRemain" class="text-xs text-gray-200 mt-1">Осталось: ${fmtSec(remain)}</div>
+    <div id="timerRemain" class="text-xs text-gray-100 mt-1">Осталось: ${fmtSec(remain)}</div>
   `;
 }
 function buttonPrimary(id, label, disabled=false){
@@ -110,116 +115,38 @@ function optionButton(text, idx, disabled=false, correct=false){
   if (disabled) bg += " opacity-70 cursor-not-allowed";
   return `<button class="${base} ${bg}" data-idx="${idx}" ${disabled?'disabled':''}>${text}</button>`;
 }
-function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
 
-// ===== Поллинг и таймеры =====
-function startPolling(i=POLL_INTERVAL_MS){ if (!pollTimer) pollTimer = setInterval(()=>getState({soft:true}), i); }
-function stopPolling(){ if (pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
-function setDeadlineTimer(deadline){
-  if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
-  const delay = Math.max(0, (deadline - nowSec())*1000 + DEADLINE_SLOP_MS);
-  deadlineTimer = setTimeout(()=> getState({soft:true}), delay);
-}
-function startLocalTimer(deadline, total){
-  stopLocalTimer();
-  localTimer = setInterval(()=>{
-    const remain = Math.max(0, deadline - nowSec());
-    const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
-    const bar = document.getElementById("timerBar");
-    const rem = document.getElementById("timerRemain");
-    if (bar) bar.style.width = `${pct}%`;
-    if (rem) rem.textContent = `Осталось: ${fmtSec(remain)}`;
-    if (remain <= 0) stopLocalTimer();
-  }, LOCAL_TIMER_MS);
-}
-function stopLocalTimer(){ if (localTimer){ clearInterval(localTimer); localTimer=null; } }
-
-// ===== API helpers (POST с ретраями) =====
-async function apiGetState(signal){
-  const res = await fetch(`/api/get_state?chat_id=${chat_id}&user_id=${user_id}`, { signal });
-  return res.json();
-}
-async function postJSON(url, body, {retries=2}={}){
-  let attempt=0;
-  while(true){
-    try{
-      const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
-      const data = await res.json();
-      if (!data.ok) throw new Error("server not ok");
-      return data;
-    }catch(e){
-      if (attempt>=retries) throw e;
-      attempt++; showNetBadge(true);
-      await new Promise(r=>setTimeout(r, 300*attempt));
-    }finally{
-      if (attempt===0) showNetBadge(false); else setTimeout(()=>showNetBadge(false), 400);
-    }
-  }
-}
-async function apiRematchState(){
-  const res = await fetch(`/api/rematch/state?chat_id=${chat_id}&user_id=${user_id}`);
-  return res.json();
+function isAnswered(state){
+  const me = state.players?.[String(user_id)];
+  return !!me?.answered;
 }
 
-// ===== Обратный отсчёт (неблокирующий) =====
-function clearCountdown(){
-  countdownUntil = null;
-  if (countdownTicker) cancelAnimationFrame(countdownTicker);
-  const chip = document.getElementById("countdownChip");
-  if (chip) chip.remove();
-}
-function startCountdown(sec=COUNTDOWN_SEC){
-  clearCountdown();
-  countdownUntil = nowSec() + sec;
-  const box = document.getElementById("optionsBox");
-  if (!box) return; // покажется на следующем рендере
-  const chip = document.createElement("div");
-  chip.id = "countdownChip";
-  chip.className = "inline-block px-3 py-1 rounded-full bg-purple-900/60 border border-white/20 text-sm text-gray-100 mb-2";
-  chip.style.userSelect = "none";
-  chip.textContent = `Начинаем через: ${sec}`;
-  box.parentElement.insertBefore(chip, box); // над вариантами
-
-  const tick = ()=>{
-    if (!countdownUntil){ if (chip) chip.remove(); return; }
-    const left = Math.ceil(countdownUntil - nowSec());
-    if (left > 0){
-      chip.textContent = `Начинаем через: ${left}`;
-      countdownTicker = requestAnimationFrame(tick);
-    } else {
-      // Авто-снятие
-      clearCountdown();
-    }
-  };
-  countdownTicker = requestAnimationFrame(tick);
-}
-
-// ===== Рендеры =====
+// ---------- Рендеры ----------
 function renderAdmin(state){
   const rnd = state.round, q = state.question;
   const playersCount = Object.keys(state.players||{}).length;
-  const firstScreen = !state.round;  // панели таймера — только до первого раунда
+  const firstScreen = !state.round; // панель таймера и старт — только до первого раунда
 
   const timerBlock = firstScreen ? `
-    <div class="p-3 bg-purple-900/60 rounded-lg space-y-2 border border-white/10">
-      <div class="text-sm text-gray-200">Таймер вопроса (сек):</div>
+    <div class="p-3 bg-purple-900/40 rounded-lg space-y-2 border border-white/10">
+      <div class="text-sm text-gray-100">Таймер вопроса (сек):</div>
       <div class="grid grid-cols-4 gap-2">
         ${[15,30,45,60].map(s=>`
           <button class="timer btn py-2 rounded-lg ${state.timer_seconds===s?'bg-purple-600':'bg-purple-800 hover:bg-purple-700'}" data-s="${s}">${s}</button>
         `).join("")}
       </div>
-      ${buttonPrimary("saveTimer","💾 Сохранить таймер", pendingAction)}
+      ${buttonPrimary("saveTimer","💾 Сохранить таймер")}
     </div>
   ` : "";
 
   const controls = `
-    <div class="p-3 bg-purple-900/60 rounded-lg space-y-2 mt-3 border border-white/10">
+    <div class="p-3 bg-purple-900/40 rounded-lg space-y-2 mt-3 border border-white/10">
       <div class="grid ${firstScreen ? 'grid-cols-1' : 'grid-cols-2'} gap-2">
-        ${firstScreen ? buttonPrimary("startRound","▶ Начать квиз", pendingAction) : ""}
-        ${buttonGhost("nextRound","⏭ Следующий вопрос", pendingAction || !state.round || !state.round.finished)}
-        ${buttonGhost("endQuiz","🛑 Завершить квиз", pendingAction)}
+        ${firstScreen ? buttonPrimary("startRound","▶ Начать квиз") : ""}
+        ${buttonGhost("nextRound","⏭ Следующий вопрос", !state.round || !state.round.finished)}
+        ${buttonGhost("endQuiz","🛑 Завершить квиз")}
       </div>
-      <div class="text-xs text-gray-200">Админ тоже может отвечать.</div>
+      <div class="text-xs text-gray-100">Админ тоже может отвечать.</div>
     </div>
   `;
 
@@ -228,21 +155,24 @@ function renderAdmin(state){
     body = `
       <div class="text-center">
         <p class="text-xl mb-2">⏳ Вопрос ещё не начат.</p>
-        <p class="text-sm text-gray-200">Игроков: ${playersCount}</p>
+        <p class="text-sm text-gray-100">Игроков: ${playersCount}</p>
       </div>
     `;
   } else {
     const remain = Math.max(0, (rnd?.deadline||0) - nowSec());
     const total = (state.timer_seconds||1);
+    // Зелёный — ТОЛЬКО если раунд завершён и сервер прислал answer
+    const finished = !!(state.round && state.round.finished && typeof q.answer === "number");
     const optsHtml = q.options.map((opt,i)=>{
-      const correct = rnd?.finished ? (i===q.answer) : false;
-      return optionButton(opt, i, isAnswered(state) || (countdownUntil && nowSec()<countdownUntil), correct);
+      const correct = finished && (i===q.answer);
+      const disabled = isAnswered(state) || finished; // блокируем только если уже ответил или раунд закрыт
+      return optionButton(opt, i, disabled, correct);
     }).join("");
     body = `
       <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
       <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
       ${rnd ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
-      <div class="text-sm text-gray-200 mt-2">
+      <div class="text-sm text-gray-100 mt-2">
         Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
       </div>
     `;
@@ -253,10 +183,10 @@ function renderAdmin(state){
     <h2 class="text-xl mb-4">👑 Панель администратора</h2>
     ${timerBlock}
     ${controls}
-    <div class="mt-4 p-3 bg-purple-800/35 rounded-lg border border-white/10">${body}</div>
+    <div class="mt-4 p-3 bg-purple-800/30 rounded-lg border border-white/10">${body}</div>
   `;
 
-  // handlers
+  // ----- handlers -----
   document.querySelectorAll(".timer").forEach(b=>{
     b.onclick = ()=>{
       chosenTimer = parseInt(b.dataset.s);
@@ -267,14 +197,10 @@ function renderAdmin(state){
 
   const saveTimerBtn = document.getElementById("saveTimer");
   if (saveTimerBtn) saveTimerBtn.onclick = async ()=>{
-    // не перерендериваем мгновенно, чтобы не терять клики
     saveTimerBtn.disabled = true;
-    try{
-      await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer});
-    }catch(e){} finally{
-      saveTimerBtn.disabled = false;
-      getState({soft:false});
-    }
+    const r = await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer}).catch(()=>({ok:false}));
+    saveTimerBtn.disabled = false;
+    if (r.ok) getState({soft:false});
   };
 
   const startBtn = document.getElementById("startRound");
@@ -282,14 +208,13 @@ function renderAdmin(state){
     startBtn.disabled = true;
     try{
       if (!lastState?.timer_seconds){
-        await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer});
+        const c = await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer});
+        if (!c.ok) { startBtn.disabled=false; return; }
       }
-      await postJSON("/api/admin/start", {chat_id, user_id, timer_seconds: chosenTimer});
-      startCountdown();                       // ненавязчивый отсчёт
-      tg?.HapticFeedback?.notificationOccurred?.('success');
-    }catch(e){} finally{
+      const r = await postJSON("/api/admin/start", {chat_id, user_id, timer_seconds: chosenTimer});
+      if (r.ok) getState({soft:false});
+    } finally {
       startBtn.disabled = false;
-      getState({soft:false});
     }
   };
 
@@ -298,27 +223,25 @@ function renderAdmin(state){
     if (nextBtn.disabled) return;
     nextBtn.disabled = true;
     try{
-      await postJSON("/api/admin/next", {chat_id, user_id});
-      startCountdown();
-      tg?.HapticFeedback?.impactOccurred?.('medium');
-    }catch(e){} finally{
+      const r = await postJSON("/api/admin/next", {chat_id, user_id});
+      if (r.ok) getState({soft:false});
+    } finally {
       nextBtn.disabled = false;
-      getState({soft:false});
     }
   };
 
   const endBtn = document.getElementById("endQuiz");
   if (endBtn) endBtn.onclick = async ()=>{
-    if (endBtn.disabled) return;
     if (!confirm("Завершить квиз и показать результаты?")) return;
     endBtn.disabled = true;
     try{
       const r = await postJSON("/api/admin/end", {chat_id, user_id});
-      stopPolling(); stopLocalTimer(); clearCountdown();
-      renderFinalBoard(r.leaderboard || []);
-      startRematchWatch();
-      tg?.HapticFeedback?.notificationOccurred?.('success');
-    }catch(e){} finally{
+      if (r.ok){
+        stopPolling(); stopLocalTimer();
+        renderFinalBoard(r.leaderboard || []);
+        startRematchWatch();
+      }
+    } finally {
       endBtn.disabled = false;
     }
   };
@@ -329,11 +252,8 @@ function renderAdmin(state){
 
   if (state.round && !state.round.finished){
     startLocalTimer(state.round.deadline, state.timer_seconds || 1);
-    // если в момент рендера отсчёт активен — убедимся, что чип существует
-    if (countdownUntil && nowSec()<countdownUntil) startCountdown(Math.ceil(countdownUntil - nowSec()));
   } else {
     stopLocalTimer();
-    clearCountdown();
   }
 }
 
@@ -345,20 +265,20 @@ function renderPlayer(state){
     app.innerHTML = `
       <div class="text-center">
         <p class="text-xl mb-2">⏳ Ждём начала вопроса...</p>
-        <div class="text-sm text-gray-200">Игроков: ${playersCount}</div>
+        <div class="text-sm text-gray-100">Игроков: ${playersCount}</div>
       </div>
     `;
-    stopLocalTimer(); clearCountdown();
+    stopLocalTimer();
     return;
   }
 
   const remain = Math.max(0, (rnd?.deadline||0) - nowSec());
   const total = (state.timer_seconds||1);
+  const finished = !!(state.round && state.round.finished && typeof q.answer === "number");
 
   const optsHtml = q.options.map((opt,i)=>{
-    const correct = rnd?.finished ? (i===q.answer) : false;
-    // во время отсчёта клики отключены, но варианты видны
-    const disabled = isAnswered(state) || (countdownUntil && nowSec()<countdownUntil);
+    const correct = finished && (i===q.answer);
+    const disabled = isAnswered(state) || finished; // кликабельно, пока не ответил и раунд не закрыт
     return optionButton(opt, i, disabled, correct);
   }).join("");
 
@@ -366,7 +286,7 @@ function renderPlayer(state){
     <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
     <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
     ${rnd ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
-    <div class="text-sm text-gray-200 mt-2">
+    <div class="text-sm text-gray-100 mt-2">
       Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
     </div>
   `;
@@ -379,29 +299,26 @@ function renderPlayer(state){
 
   if (state.round && !state.round.finished){
     startLocalTimer(state.round.deadline, state.timer_seconds || 1);
-    if (countdownUntil && nowSec()<countdownUntil) startCountdown(Math.ceil(countdownUntil - nowSec()));
   } else {
     stopLocalTimer();
-    clearCountdown();
-    if (q.answer !== undefined) tg?.HapticFeedback?.impactOccurred?.('light');
   }
 }
 
 function renderFinalBoard(board){
-  stopLocalTimer(); clearCountdown();
+  stopLocalTimer();
   const medals=["🥇","🥈","🥉"];
   const rows = (board||[]).map((it,idx)=>`
-    <div class="flex items-center justify-between py-2 px-3 bg-purple-900/45 rounded-lg border border-white/10">
+    <div class="flex items-center justify-between py-2 px-3 bg-purple-900/30 rounded-lg border border-white/10">
       <div>${medals[idx] || "🎖️"}</div>
       <div class="font-semibold">${it.name}</div>
       <div>${it.score} балл(ов)</div>
-      <div class="text-sm text-gray-300">${Number(it.total_time).toFixed(2)} сек</div>
+      <div class="text-sm text-gray-200">${Number(it.total_time).toFixed(2)} сек</div>
     </div>
   `).join("");
 
   const joinBtn = buttonPrimary("rematchJoin","🔁 Участвовать ещё раз");
   const adminPanel = `
-    <div id="rematchAdmin" class="mt-4 p-3 bg-purple-900/50 rounded-lg border border-white/10 hidden">
+    <div id="rematchAdmin" class="mt-4 p-3 bg-purple-900/30 rounded-lg border border-white/10 hidden">
       <div class="text-sm mb-2">Подтвердили участие:</div>
       <div id="rematchList" class="space-y-1 text-sm"></div>
       <div class="mt-3">${buttonGhost("rematchStart","🚀 Перезапустить квиз")}</div>
@@ -416,12 +333,9 @@ function renderFinalBoard(board){
   `;
 
   document.getElementById("rematchJoin").onclick = async ()=>{
-    try{
-      const name = tg?.initDataUnsafe?.user?.first_name || "Игрок";
-      await postJSON("/api/rematch/join", {chat_id, user_id, name});
-      tg?.HapticFeedback?.notificationOccurred?.('success');
-      updateRematchAdminUI();
-    }catch(e){}
+    const name = tg?.initDataUnsafe?.user?.first_name || "Игрок";
+    const r = await postJSON("/api/rematch/join", {chat_id, user_id, name}).catch(()=>({ok:false}));
+    if (r.ok) updateRematchAdminUI();
   };
 
   updateRematchAdminUI(true);
@@ -441,13 +355,12 @@ async function updateRematchAdminUI(forceShow=false){
   const startBtn = document.getElementById("rematchStart");
   if (startBtn){
     startBtn.onclick = async ()=>{
-      try{
-        await postJSON("/api/rematch/start", {chat_id, user_id});
-        renderLoading("Запуск новой игры…");
+      const r = await postJSON("/api/rematch/start", {chat_id, user_id}).catch(()=>({ok:false}));
+      if (r.ok){
         if (rematchTimer){ clearInterval(rematchTimer); rematchTimer=null; }
-        tg?.HapticFeedback?.notificationOccurred?.('success');
+        renderLoading("Запуск новой игры…");
         getState({soft:false});
-      }catch(e){}
+      }
     };
   }
 }
@@ -456,7 +369,7 @@ function startRematchWatch(){
   rematchTimer = setInterval(updateRematchAdminUI, 2000);
 }
 
-// ===== Синхронизация =====
+// ---------- Синхронизация ----------
 async function getState(opts={}){
   if (inFlight) return;
   try{
@@ -467,24 +380,23 @@ async function getState(opts={}){
     const data = await apiGetState(lastAbort.signal);
 
     if (data.ended){
-      stopPolling(); stopLocalTimer(); clearCountdown();
+      stopPolling(); stopLocalTimer();
       const rs = await apiRematchState();
       if (rs.ok){
         renderFinalBoard(rs.leaderboard || []);
         startRematchWatch();
-      }else{
+      } else {
         renderLoading("Квиз завершён.");
       }
       return;
     }
     if (!data.ok){ renderLoading("Игра не найдена."); return; }
 
-    // Новый вопрос? — запускаем краткий отсчёт (но не блокируем интерфейс)
-    const newQuestion = data.round && (!lastState?.round || data.round.started_at !== lastState.round.started_at);
-    if (newQuestion) startCountdown();
+    const isNewQuestion = data.round && (!lastState?.round || data.round.started_at !== lastState.round.started_at);
 
-    if (data.rev !== lastRev || !opts.soft){
-      lastRev = data.rev; lastState = data;
+    if (data.rev !== lastRev || !opts.soft || isNewQuestion){
+      lastRev = data.rev;
+      lastState = data;
 
       if (data.round && !data.round.finished) startPolling(POLL_INTERVAL_MS);
       else stopPolling();
@@ -495,16 +407,9 @@ async function getState(opts={}){
       if (data.role === "admin") renderAdmin(data);
       else renderPlayer(data);
     }
-  }catch(e){
-    // молча игнорируем AbortError
   }finally{
     inFlight = false;
   }
-}
-
-function isAnswered(state){
-  const me = state.players?.[String(user_id)];
-  return !!me?.answered;
 }
 
 async function submitAnswer(e){
@@ -512,15 +417,15 @@ async function submitAnswer(e){
   if (isNaN(idx)) return;
   document.querySelectorAll(".option").forEach(b=>b.setAttribute("disabled","disabled"));
   try{
-    await postJSON("/api/submit", { chat_id, user: { id: user_id }, given: idx });
-    tg?.HapticFeedback?.impactOccurred?.('light');
-    getState({soft:false});
+    const r = await postJSON("/api/submit", { chat_id, user: { id: user_id }, given: idx });
+    if (r.ok) getState({soft:false});
+    else document.querySelectorAll(".option").forEach(b=>b.removeAttribute("disabled"));
   }catch(err){
     document.querySelectorAll(".option").forEach(b=>b.removeAttribute("disabled"));
   }
 }
 
-// ===== Точка входа =====
+// ---------- Точка входа ----------
 if (Number.isNaN(chat_id) || Number.isNaN(user_id)) {
   app.innerHTML = `
     <div class="text-center">
@@ -529,7 +434,9 @@ if (Number.isNaN(chat_id) || Number.isNaN(user_id)) {
     </div>
   `;
 } else {
-  ensureOverlay();
+  // сбрасываем возможный тёмный фон из старой версии
+  document.documentElement.style.background = "#0b0220";
+  document.body.style.background = "#0b0220";
   renderLoading();
   getState({soft:false});
 }
