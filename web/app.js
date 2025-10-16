@@ -35,12 +35,22 @@ function fmtSec(s){
 }
 function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
 
+// Сброс фона к стартовому (как до начала квиза)
+function resetBackgroundToDefault(){
+  currentBg = null;
+  document.documentElement.style.setProperty('background-image', 'none', 'important');
+  document.body.style.setProperty('background-image', 'none', 'important');
+  document.documentElement.style.setProperty('background', '#0b0220', 'important');
+  document.body.style.setProperty('background', '#0b0220', 'important');
+}
+
+// Надёжная смена фона (без затемнения, без «чёрного экрана»)
 function setBackground(url){
   if (!url || url === currentBg) return;
   const img = new Image();
   img.onload = () => {
     currentBg = url;
-    // Жёстко проставляем инлайн-стили с приоритетом !important — чтобы точно перекрыть любые CSS-правила
+    // ставим фон и на body, и на html с приоритетом
     document.documentElement.style.setProperty('background-image', `url("${url}")`, 'important');
     document.documentElement.style.setProperty('background-repeat', 'no-repeat', 'important');
     document.documentElement.style.setProperty('background-position', 'center', 'important');
@@ -169,7 +179,6 @@ function renderAdmin(state){
   } else {
     const remain = Math.max(0, (rnd?.deadline||0) - nowSec());
     const total = (state.timer_seconds||1);
-    // Зелёный — ТОЛЬКО если раунд завершён и сервер прислал answer
     const finished = !!(state.round && state.round.finished && typeof q.answer === "number");
     const optsHtml = q.options.map((opt,i)=>{
       const correct = finished && (i===q.answer);
@@ -313,6 +322,9 @@ function renderPlayer(state){
 }
 
 function renderFinalBoard(board){
+  // <<< ВАЖНО: сбрасываем фон к стартовому >>>
+  resetBackgroundToDefault();
+
   stopLocalTimer();
   const medals=["🥇","🥈","🥉"];
   const rows = (board||[]).map((it,idx)=>`
@@ -395,6 +407,7 @@ async function getState(opts={}){
         startRematchWatch();
       } else {
         renderLoading("Квиз завершён.");
+        resetBackgroundToDefault(); // на всякий случай
       }
       return;
     }
@@ -442,9 +455,8 @@ if (Number.isNaN(chat_id) || Number.isNaN(user_id)) {
     </div>
   `;
 } else {
-  // сбрасываем возможный тёмный фон из старой версии
-  document.documentElement.style.background = "#0b0220";
-  document.body.style.background = "#0b0220";
+  // стартовый фон
+  resetBackgroundToDefault();
   renderLoading();
   getState({soft:false});
 }
