@@ -1,27 +1,29 @@
-/* ===== База ===== */
+/* База */
 * { box-sizing: border-box; }
 html, body {
   height: 100%;
   min-height: 100%;
-  margin: 0; padding: 0;
+  margin: 0;
+  padding: 0;
   color: #fff;
-  background-color: #0b0220; /* фолбэк, фоновая картинка задаётся из JS */
+  background-color: #0b0220;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell,
                "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji",
                "Segoe UI Emoji", "Segoe UI Symbol";
 }
 
-/* Контейнер мини-аппа: центр + поля */
+/* Контент: учитываем safe-area, чтобы верх не «рубился» */
 #content {
   position: relative;
   z-index: 1;
-  padding: 16px;
+  padding: calc(16px + env(safe-area-inset-top, 0px)) 16px 16px 16px;
   max-width: 520px;
   margin: 0 auto;
   min-height: 100vh;
+  scroll-behavior: auto;
 }
 
-/* Небольшой контрастный скрим только под контентом (фон видно!) */
+/* Лёгкий градиент подложки */
 #content::before {
   content: "";
   position: absolute; inset: 0;
@@ -33,22 +35,17 @@ html, body {
   border-radius: 18px;
 }
 
-/* ===== Текст и типографика ===== */
+/* Типографика */
 .text-sm { font-size: 0.92rem; }
 .text-lg { font-size: 1.12rem; }
 .text-xl { font-size: 1.32rem; }
 .font-semibold { font-weight: 600; }
+h1,h2,h3,p,div,button { text-shadow: 0 1px 2px rgba(0,0,0,.45); }
 
-/* Лёгкая тень для читаемости на пёстром фоне */
-h1,h2,h3,p,div,button {
-  text-shadow: 0 1px 2px rgba(0,0,0,.45);
-}
-
-/* ===== Сетка и отступы (лайт-утилиты) ===== */
+/* Сетка и отступы */
 .grid { display: grid; gap: .6rem; }
 .grid-cols-1 { grid-template-columns: 1fr; }
 .grid-cols-2 { grid-template-columns: 1fr 1fr; }
-.grid-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
 .grid-cols-4 { grid-template-columns: repeat(4, 1fr); }
 .mt-2 { margin-top: .5rem; }
 .mt-3 { margin-top: .75rem; }
@@ -59,8 +56,7 @@ h1,h2,h3,p,div,button {
 .mb-4 { margin-bottom: 1rem; }
 .p-3  { padding: .9rem; }
 
-/* ===== «Стекло» для панелей и карточек =====
-   Перехватываем все классы, начинающиеся на bg-purple… из разметки */
+/* Frosted glass */
 [class^="bg-purple"] {
   background: rgba(20, 12, 40, 0.35);
   border: 1px solid rgba(255,255,255,0.18);
@@ -70,7 +66,7 @@ h1,h2,h3,p,div,button {
   box-shadow: 0 10px 30px rgba(0,0,0,0.25);
 }
 
-/* ===== Кнопки ===== */
+/* Кнопки */
 button {
   border: none;
   cursor: pointer;
@@ -82,13 +78,12 @@ button:hover { filter: brightness(1.06); }
 button:active { transform: translateY(1px); }
 button:disabled { opacity: 0.6; cursor: not-allowed; }
 
-/* Главная / вторичная — усиливаем контраст, но оставляем просвет */
 .bg-purple-600 { background-color: rgba(120, 80, 200, 0.85); }
 .bg-purple-700 { background-color: rgba(104, 55, 151, 0.75); }
 .bg-purple-800 { background-color: rgba(70, 40, 110, 0.55); }
 .bg-purple-900 { background-color: rgba(30, 20, 55, 0.45); }
 
-/* ===== Варианты ответа ===== */
+/* Варианты ответа */
 .option {
   background: rgba(96, 58, 158, 0.60);
   border: 1px solid rgba(255,255,255,0.20);
@@ -104,14 +99,14 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .option:active { transform: translateY(1px); }
 .option[disabled] { opacity: .85; }
 
-/* Правильный ответ — ярче, но не «ядовито» */
+/* Правильный ответ */
 .bg-green-700 {
   background: rgba(34, 197, 94, 0.80) !important;
   border-color: rgba(255,255,255,0.25) !important;
   box-shadow: 0 10px 26px rgba(34, 197, 94, 0.25);
 }
 
-/* ===== Прогресс-бар ===== */
+/* Прогресс-бар */
 .w-full { width: 100%; }
 .h-3 { height: 12px; }
 .rounded-full { border-radius: 999px; }
@@ -119,17 +114,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .bg-purple-900\/40 { background-color: rgba(30, 20, 55, 0.40); }
 .bg-purple-400 { background-color: rgba(189, 147, 249, 0.95); }
 
-/* Если классы тайлвинда с / не применяются, резерв: */
-div[style*="bg-purple-900/40"] { background-color: rgba(30,20,55,0.40) !important; }
+.text-gray-100, .text-gray-200 { color: rgba(255,255,255,0.92); }
 
-/* ===== Мелкие улучшения читабельности ===== */
-hr, .divider {
-  border: none; height: 1px; width: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.25), transparent);
-  margin: .75rem 0;
-}
-
-/* Подписи/мелкий текст чуть контрастнее */
-.text-gray-100, .text-gray-200 {
-  color: rgba(255,255,255,0.92);
-}
+/* На всякий случай: первый блок чуть отступает от верхнего края */
+#content > *:first-child { margin-top: 8px; }
