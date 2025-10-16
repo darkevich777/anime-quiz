@@ -1,4 +1,4 @@
-// ===== Mini App — стабильный отсчёт 3..2..1, синхронизированный с сервером =====
+// ===== Mini App — стабильный отсчёт 3..2..1, без зависаний =====
 const tg = window.Telegram.WebApp;
 tg.expand();
 
@@ -13,8 +13,8 @@ const POLL_INTERVAL_MS = 3000;
 const DEADLINE_SLOP_MS = 300;
 const LOCAL_TIMER_MS = 250;
 const COUNTDOWN_SEC = 3;
-const COUNTDOWN_SKIP_THRESHOLD = 0.2;  // если до конца отсчёта < 0.2с — сразу показываем вопрос
-const PRELOAD_WAIT_CAP_MS = 800;       // максимально ждём предзагрузку после отсчёта
+const COUNTDOWN_SKIP_THRESHOLD = 0.2;   // если до конца отсчёта < 0.2с — показываем вопрос сразу
+const PRELOAD_WAIT_CAP_MS = 800;        // максимум ждём предзагрузку после отсчёта
 const OPTIONS_MIN_HEIGHT_PX = 260;
 
 let lastState = null;
@@ -29,14 +29,14 @@ let rematchTimer = null;
 let chosenTimer = 30;
 let currentBg = null; // текущий фон
 
-// --- состояние отсчёта и предзагрузки ---
+// --- состояние отсчёта/предзагрузки ---
 let countdownActive = false;
-let countdownEndTs = 0;                 // серверный started_at + COUNTDOWN_SEC
+let countdownEndTs = 0;              // серверный started_at + COUNTDOWN_SEC
 let countdownRaf = null;
-let countdownHardTimeout = null;        // жёсткий фолбэк
+let countdownHardTimeout = null;     // фиксированный фолбэк
 let nextQImageUrl = null;
 let nextQImageReady = false;
-let countingStartedAt = null;           // started_at для которого идёт отсчёт
+let countingStartedAt = null;        // started_at для которого идёт отсчёт
 
 // ---------- Утилиты ----------
 function nowSec(){ return Date.now()/1000; }
@@ -177,14 +177,19 @@ function clearCountdown(){
   countdownHardTimeout = null;
 }
 function startCountdownForQuestion(startedAt, imageUrl){
-  // если уже крутится именно для этого startedAt — выходим
+  // если уже крутится для этого startedAt — выходим
   if (countdownActive && countingStartedAt === startedAt) return;
 
-  // если до конца «идеального» отсчёта меньше 0.2с — пропускаем отсчёт
   const serverEnd = startedAt + COUNTDOWN_SEC;
-  if (serverEnd - nowSec() <= COUNTDOWN_SKIP_THRESHOLD){
-    // фон всё равно предзагрузим и ставим сразу
-    preloadImage(imageUrl).then(()=>{ if (imageUrl) setBackground(imageUrl); });
+  const timeLeft = serverEnd - nowSec();
+
+  // если пришли поздно — пропускаем отсчёт
+  if (timeLeft <= COUNTDOWN_SKIP_THRESHOLD){
+    if (imageUrl) preloadImage(imageUrl).then(()=> setBackground(imageUrl));
+    // гарантированно нет "висюка"
+    clearCountdown();
+    // сразу перерисуем вопрос
+    setTimeout(()=>getState({soft:false}), 0);
     return;
   }
 
@@ -197,11 +202,10 @@ function startCountdownForQuestion(startedAt, imageUrl){
   // предзагрузка
   preloadImage(nextQImageUrl).then(ok => { nextQImageReady = ok || !imageUrl; });
 
-  // сбрасываем фон на время отсчёта
+  // на время отсчёта — базовый фон
   resetBackgroundToDefault();
   showCountdownScreen();
 
-  // «мягкие» тики рендера (rAF)
   const tick = ()=>{
     if (!countdownActive || countingStartedAt !== startedAt) return;
     const left = Math.ceil(countdownEndTs - nowSec());
@@ -215,25 +219,40 @@ function startCountdownForQuestion(startedAt, imageUrl){
   };
   countdownRaf = requestAnimationFrame(tick);
 
-  // Жёсткий фолбэк на случай «замирания» таймеров/кадров
+  // ФИКСИРОВАННЫЙ жёсткий фолбэк: COUNTDOWN_SEC + PRELOAD_WAIT_CAP_MS + 300мс
   countdownHardTimeout = setTimeout(()=>{
     if (countdownActive && countingStartedAt === startedAt) finishCountdownAndShowQuestion();
-  }, (serverEnd - nowSec())*1000 + PRELOAD_WAIT_CAP_MS);
+  }, COUNTDOWN_SEC*1000 + PRELOAD_WAIT_CAP_MS + 300);
 }
 function finishCountdownAndShowQuestion(){
   const waitUntil = Date.now() + PRELOAD_WAIT_CAP_MS;
   const waitLoop = ()=>{
-    if (!countdownActive) return; // уже снято где-то
+    if (!countdownActive) return; // уже сняли
     if (nextQImageReady || Date.now() > waitUntil){
       if (nextQImageUrl) setBackground(nextQImageUrl);
       clearCountdown();
-      // перерисовываем актуальный вопрос
-      getState({soft:false});
+      getState({soft:false}); // показать вопрос
     } else {
       setTimeout(waitLoop, 50);
     }
   };
   waitLoop();
+}
+
+// Если мы получили состояние, из которого видно что раунд уже идёт — снимаем оверлей без ожидания
+function maybeDismissCountdownByState(data){
+  if (!countdownActive) return;
+  const sameRound = data.round && data.round.started_at === countingStartedAt;
+  const roundOngoing = data.round && !data.round.finished && (data.round.deadline - nowSec() > 0);
+  const timeLeft = countdownEndTs - nowSec();
+  if (sameRound && (timeLeft <= 0.05 || roundOngoing)){
+    // фон ставим сразу (если уже прогружен), но не блокируемся на нём
+    if (nextQImageUrl){
+      if (nextQImageReady) setBackground(nextQImageUrl);
+      else setTimeout(()=>setBackground(nextQImageUrl), 0);
+    }
+    clearCountdown();
+  }
 }
 
 // ---------- Рендеры ----------
@@ -265,7 +284,6 @@ function renderAdmin(state){
     </div>
   `;
 
-  // если идёт отсчёт — показываем только экран отсчёта
   if (countdownActive){
     app.innerHTML = `<h2 class="text-xl mb-4">👑 Панель администратора</h2>${timerBlock}${controls}`;
     showCountdownScreen();
@@ -276,7 +294,7 @@ function renderAdmin(state){
   if (!q){
     body = `
       <div class="text-center">
-        <p class="text-xl mb-2">⏳ Вопрос ещё не начат.</p>
+        <p class="text-xl mb-2">🎮 Квиз ещё не начался!</p>
         <p class="text-sm text-gray-100">Игроков: ${playersCount}</p>
       </div>
     `;
@@ -384,7 +402,7 @@ function renderPlayer(state){
   if (!q){
     app.innerHTML = `
       <div class="text-center">
-        <p class="text-xl mb-2">⏳ Ждём начала вопроса...</p>
+        <p class="text-xl mb-2">🎮 Квиз ещё не начался!</p>
         <div class="text-sm text-gray-100">Игроков: ${playersCount}</div>
       </div>
     `;
@@ -513,6 +531,9 @@ async function getState(opts={}){
     }
     if (!data.ok){ renderLoading("Игра не найдена."); return; }
 
+    // если видим, что раунд уже идёт — на всякий случай снимем оверлей
+    maybeDismissCountdownByState(data);
+
     // детект нового вопроса
     const startedAt = data.round?.started_at;
     const newQuestion = startedAt && (!lastState?.round || startedAt !== lastState.round.started_at);
@@ -522,7 +543,7 @@ async function getState(opts={}){
       startCountdownForQuestion(startedAt, imgUrl);
     }
 
-    // обновляем локальное состояние и таймеры
+    // обновляем локальное состояние/таймеры
     if (data.rev !== lastRev || !opts.soft || newQuestion){
       lastRev = data.rev;
       lastState = data;
