@@ -1,56 +1,54 @@
-/* Сброс и базовые стили */
-* {
-  box-sizing: border-box;
-}
-
+/* ===== базовые ===== */
+* { box-sizing: border-box; }
 html, body {
   height: 100%;
   min-height: 100%;
-  /* Фолбэк-цвет на случай, если картинка ещё не загружена */
-  background-color: #0b0220;
-  /* ВАЖНО: НЕ задаём здесь background: ... !important; чтобы не перебить фон из JS */
+  background-color: #0b0220; /* фолбэк, фон-картинка ставится из JS */
   color: #ffffff;
-  margin: 0;
-  padding: 0;
-  font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  margin: 0; padding: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell,
+               "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji",
+               "Segoe UI Emoji", "Segoe UI Symbol";
 }
 
-/* Контейнер приложения */
+/* контейнер */
 #content {
   position: relative;
   z-index: 1;
   padding: 16px;
+  /* лёгкая общая тень для контента */
+  text-shadow: 0 1px 2px rgba(0,0,0,.55);
+  isolation: isolate; /* чтобы псевдослой был под контентом */
 }
 
-/* Карточки/панели (легкая полупрозрачность, без глобального затемнения всей страницы) */
-.bg-purple-900,
-.bg-purple-800,
-.bg-purple-700,
-.bg-purple-600 {
-  /* Эти классы встречаются в разметке — даём им адекватный вид без Tailwind */
-  background-color: rgba(104, 55, 151, 0.35);
-  border-radius: 12px;
+/* мягкая виньетка по краям экрана (очень деликатная) */
+#content::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(120% 120% at 50% 30%,
+      rgba(6,4,20,0.00) 0%,
+      rgba(6,4,20,0.12) 60%,
+      rgba(6,4,20,0.18) 85%,
+      rgba(6,4,20,0.24) 100%);
 }
 
-button {
-  border: none;
-  cursor: pointer;
-  color: #fff;
-  border-radius: 12px;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-/* Мелочи для типографики */
-.text-sm { font-size: 0.9rem; }
-.text-lg { font-size: 1.1rem; }
-.text-xl { font-size: 1.25rem; }
+/* ===== типографика ===== */
+.text-sm { font-size: 0.92rem; }
+.text-lg { font-size: 1.15rem; }
+.text-xl { font-size: 1.32rem; }
 .font-semibold { font-weight: 600; }
 
-/* Утилиты отступов — минимум, чтобы не тянуть Tailwind */
+h1, h2, h3, .text-xl, .text-lg {
+  text-shadow:
+    0 2px 6px rgba(0,0,0,.35),
+    0 1px 2px rgba(0,0,0,.6);
+}
+
+/* отступы/паддинги (минимальный набор) */
 .mt-2 { margin-top: .5rem; }
 .mt-3 { margin-top: .75rem; }
 .mt-4 { margin-top: 1rem; }
@@ -60,22 +58,92 @@ button:disabled {
 .mb-4 { margin-bottom: 1rem; }
 .p-3  { padding: .75rem; }
 
-/* Простая сетка по 1 колонке на мобиле */
-.grid { display: grid; gap: .5rem; }
+/* сетки */
+.grid { display: grid; gap: .6rem; }
 .grid-cols-1 { grid-template-columns: 1fr; }
-.grid-cols-2 { grid-template-columns: 1fr 1fr; }
-.grid-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+.grid-cols-2 { grid-template-columns: repeat(2, 1fr); }
+.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
 .grid-cols-4 { grid-template-columns: repeat(4, 1fr); }
 
-/* Кнопки-опции */
-.option {
-  background-color: rgba(104, 55, 151, 0.55);
-  transition: background-color .15s ease, transform .05s ease;
+/* ===== стеклянные панели/кнопки ===== */
+:root {
+  --glass-bg: rgba(18, 12, 40, 0.36);
+  --glass-border: rgba(255,255,255,0.18);
+  --glass-shadow: 0 10px 26px rgba(10, 5, 25, .35);
 }
-.option:hover { background-color: rgba(104, 55, 151, 0.7); }
-.option:active { transform: scale(0.997); }
 
-/* «Правильный» вариант после завершения раунда */
-.bg-green-700 {
-  background-color: rgba(34, 197, 94, 0.65) !important;
+.bg-purple-900,
+.bg-purple-800,
+.bg-purple-700,
+.bg-purple-600 {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: var(--glass-shadow);
 }
+
+button {
+  border: 1px solid var(--glass-border);
+  background: rgba(106, 47, 193, 0.55);
+  border-radius: 14px;
+  color: #fff;
+  cursor: pointer;
+  padding: 12px 14px;
+  transition: transform .06s ease, background-color .15s ease, opacity .2s ease;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+button:hover { background: rgba(126, 67, 213, 0.62); }
+button:active { transform: translateY(1px) scale(0.997); }
+button:disabled { opacity: .6; cursor: not-allowed; }
+
+/* вариации, чтобы не ломать существующие классы */
+.bg-purple-600 { background: rgba(126, 67, 213, 0.65); }
+.bg-purple-700 { background: rgba(106, 47, 193, 0.55); }
+.bg-purple-800 { background: rgba(18, 12, 40, 0.42); }
+.bg-purple-900 { background: rgba(18, 12, 40, 0.36); }
+
+/* ===== варианты ответов ===== */
+.option {
+  background: rgba(106, 47, 193, 0.40);
+  border: 1px solid var(--glass-border);
+  border-radius: 18px;
+  padding: 14px 16px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 8px 18px rgba(8, 3, 20, .28);
+  transition: background-color .15s ease, transform .06s ease;
+}
+.option:hover { background: rgba(126, 67, 213, 0.48); }
+.option:active { transform: scale(0.996); }
+.option[disabled] { opacity: .85; }
+
+/* правильный ответ после завершения раунда */
+.bg-green-700 {
+  background: rgba(39, 201, 111, 0.70) !important;
+  border-color: rgba(255,255,255,0.22) !important;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.6);
+}
+
+/* ===== прогресс-бар ===== */
+.w-full.bg-purple-900\/40 {
+  background: rgba(255,255,255,0.22) !important;
+}
+#timerBar {
+  background: linear-gradient(90deg, rgba(190, 165, 255, .95), rgba(150, 110, 255, .95)) !important;
+  box-shadow: 0 2px 8px rgba(150,110,255,.45);
+}
+#timerRemain {
+  color: #f1ecff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.7);
+}
+
+/* мелкий декор */
+.border { border: 1px solid var(--glass-border); }
+.rounded-lg { border-radius: 16px; }
+
+/* чтобы крупные картинки фона не «выедали» текст на белых пятнах */
+::selection { background: rgba(150,110,255,.45); color: #fff; }
