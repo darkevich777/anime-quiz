@@ -1,4 +1,4 @@
-// ===== Mini App — стабильный отсчёт 3..2..1, без зависаний =====
+// ===== Mini App — стабильный отсчёт 3..2..1, плюс выбор раундов и улучшения рематча =====
 const tg = window.Telegram.WebApp;
 tg.expand();
 
@@ -13,8 +13,8 @@ const POLL_INTERVAL_MS = 3000;
 const DEADLINE_SLOP_MS = 300;
 const LOCAL_TIMER_MS = 250;
 const COUNTDOWN_SEC = 3;
-const COUNTDOWN_SKIP_THRESHOLD = 0.2;   // если до конца отсчёта < 0.2с — показываем вопрос сразу
-const PRELOAD_WAIT_CAP_MS = 800;        // максимум ждём предзагрузку после отсчёта
+const COUNTDOWN_SKIP_THRESHOLD = 0.2;
+const PRELOAD_WAIT_CAP_MS = 800;
 const OPTIONS_MIN_HEIGHT_PX = 260;
 
 let lastState = null;
@@ -27,16 +27,17 @@ let localTimer = null;
 let rematchTimer = null;
 
 let chosenTimer = 30;
-let currentBg = null; // текущий фон
+let chosenRounds = 10;                 // <- по умолчанию 10 раундов
+let currentBg = null;
 
 // --- состояние отсчёта/предзагрузки ---
 let countdownActive = false;
-let countdownEndTs = 0;              // серверный started_at + COUNTDOWN_SEC
+let countdownEndTs = 0;
 let countdownRaf = null;
-let countdownHardTimeout = null;     // фиксированный фолбэк
+let countdownHardTimeout = null;
 let nextQImageUrl = null;
 let nextQImageReady = false;
-let countingStartedAt = null;        // started_at для которого идёт отсчёт
+let countingStartedAt = null;
 
 // ---------- Утилиты ----------
 function nowSec(){ return Date.now()/1000; }
@@ -46,6 +47,7 @@ function fmtSec(s){
   return m>0 ? `${m}:${String(r).padStart(2,"0")}` : `${r}с`;
 }
 function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
+function scrollTop(){ try{ window.scrollTo({top:0, behavior:"instant"}); }catch{} }
 
 // Стартовый фон
 function resetBackgroundToDefault(){
@@ -177,18 +179,15 @@ function clearCountdown(){
   countdownHardTimeout = null;
 }
 function startCountdownForQuestion(startedAt, imageUrl){
-  // если уже крутится для этого startedAt — выходим
   if (countdownActive && countingStartedAt === startedAt) return;
 
   const serverEnd = startedAt + COUNTDOWN_SEC;
   const timeLeft = serverEnd - nowSec();
 
-  // если пришли поздно — пропускаем отсчёт
+  // поздно пришли — пропускаем отсчёт
   if (timeLeft <= COUNTDOWN_SKIP_THRESHOLD){
     if (imageUrl) preloadImage(imageUrl).then(()=> setBackground(imageUrl));
-    // гарантированно нет "висюка"
     clearCountdown();
-    // сразу перерисуем вопрос
     setTimeout(()=>getState({soft:false}), 0);
     return;
   }
@@ -199,10 +198,8 @@ function startCountdownForQuestion(startedAt, imageUrl){
   nextQImageUrl = imageUrl || null;
   nextQImageReady = false;
 
-  // предзагрузка
   preloadImage(nextQImageUrl).then(ok => { nextQImageReady = ok || !imageUrl; });
 
-  // на время отсчёта — базовый фон
   resetBackgroundToDefault();
   showCountdownScreen();
 
@@ -219,7 +216,6 @@ function startCountdownForQuestion(startedAt, imageUrl){
   };
   countdownRaf = requestAnimationFrame(tick);
 
-  // ФИКСИРОВАННЫЙ жёсткий фолбэк: COUNTDOWN_SEC + PRELOAD_WAIT_CAP_MS + 300мс
   countdownHardTimeout = setTimeout(()=>{
     if (countdownActive && countingStartedAt === startedAt) finishCountdownAndShowQuestion();
   }, COUNTDOWN_SEC*1000 + PRELOAD_WAIT_CAP_MS + 300);
@@ -227,26 +223,23 @@ function startCountdownForQuestion(startedAt, imageUrl){
 function finishCountdownAndShowQuestion(){
   const waitUntil = Date.now() + PRELOAD_WAIT_CAP_MS;
   const waitLoop = ()=>{
-    if (!countdownActive) return; // уже сняли
+    if (!countdownActive) return;
     if (nextQImageReady || Date.now() > waitUntil){
       if (nextQImageUrl) setBackground(nextQImageUrl);
       clearCountdown();
-      getState({soft:false}); // показать вопрос
+      getState({soft:false});
     } else {
       setTimeout(waitLoop, 50);
     }
   };
   waitLoop();
 }
-
-// Если мы получили состояние, из которого видно что раунд уже идёт — снимаем оверлей без ожидания
 function maybeDismissCountdownByState(data){
   if (!countdownActive) return;
   const sameRound = data.round && data.round.started_at === countingStartedAt;
   const roundOngoing = data.round && !data.round.finished && (data.round.deadline - nowSec() > 0);
   const timeLeft = countdownEndTs - nowSec();
   if (sameRound && (timeLeft <= 0.05 || roundOngoing)){
-    // фон ставим сразу (если уже прогружен), но не блокируемся на нём
     if (nextQImageUrl){
       if (nextQImageReady) setBackground(nextQImageUrl);
       else setTimeout(()=>setBackground(nextQImageUrl), 0);
@@ -261,15 +254,22 @@ function renderAdmin(state){
   const playersCount = Object.keys(state.players||{}).length;
   const firstScreen = !state.round;
 
-  const timerBlock = firstScreen ? `
+  // --- Блок настроек до старта: таймер + количество раундов ---
+  const settingsBlock = firstScreen ? `
     <div class="p-3 bg-purple-900/40 rounded-lg space-y-2 border border-white/10">
       <div class="text-sm text-gray-100">Таймер вопроса (сек):</div>
       <div class="grid grid-cols-4 gap-2">
         ${[15,30,45,60].map(s=>`
-          <button class="timer btn py-2 rounded-lg ${state.timer_seconds===s?'bg-purple-600':'bg-purple-800 hover:bg-purple-700'}" data-s="${s}">${s}</button>
+          <button class="timer btn py-2 rounded-lg ${state.timer_seconds===s?'bg-purple-600':''}" data-s="${s}">${s}</button>
         `).join("")}
       </div>
-      ${buttonPrimary("saveTimer","💾 Сохранить таймер")}
+      <div class="text-sm text-gray-100 mt-3">Количество раундов:</div>
+      <div class="grid grid-cols-4 gap-2">
+        ${[10,15,20,30].map(n=>`
+          <button class="rounds btn py-2 rounded-lg ${ (state.rounds_total||10)===n ? 'bg-purple-600':''}" data-n="${n}">${n}</button>
+        `).join("")}
+      </div>
+      ${buttonPrimary("saveSettings","💾 Сохранить настройки")}
     </div>
   ` : "";
 
@@ -285,7 +285,7 @@ function renderAdmin(state){
   `;
 
   if (countdownActive){
-    app.innerHTML = `<h2 class="text-xl mb-4">👑 Панель администратора</h2>${timerBlock}${controls}`;
+    app.innerHTML = `<h2 class="text-xl mb-4">👑 Панель администратора</h2>${settingsBlock}${controls}`;
     showCountdownScreen();
     return;
   }
@@ -293,7 +293,7 @@ function renderAdmin(state){
   let body = "";
   if (!q){
     body = `
-      <div class="text-center">
+      <div class="p-3 bg-purple-800/30 rounded-lg border border-white/10 text-center">
         <p class="text-xl mb-2">🎮 Квиз ещё не начался!</p>
         <p class="text-sm text-gray-100">Игроков: ${playersCount}</p>
       </div>
@@ -308,11 +308,13 @@ function renderAdmin(state){
       return optionButton(opt, i, disabled, correct);
     }).join("");
     body = `
-      <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
-      <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
-      ${rnd ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
-      <div class="text-sm text-gray-100 mt-2">
-        Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
+      <div class="mt-4 p-3 bg-purple-800/30 rounded-lg border border-white/10">
+        <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
+        <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
+        ${rnd ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
+        <div class="text-sm text-gray-100 mt-2">
+          Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
+        </div>
       </div>
     `;
     if (q.image) setBackground(q.image);
@@ -320,10 +322,11 @@ function renderAdmin(state){
 
   app.innerHTML = `
     <h2 class="text-xl mb-4">👑 Панель администратора</h2>
-    ${timerBlock}
+    ${settingsBlock}
     ${controls}
-    ${body ? `<div class="mt-4 p-3 bg-purple-800/30 rounded-lg border border-white/10">${body}</div>` : ""}
+    ${body}
   `;
+  scrollTop();
 
   // ----- handlers -----
   document.querySelectorAll(".timer").forEach(b=>{
@@ -333,12 +336,23 @@ function renderAdmin(state){
       b.classList.add("bg-purple-600");
     };
   });
+  document.querySelectorAll(".rounds").forEach(b=>{
+    b.onclick = ()=>{
+      chosenRounds = parseInt(b.dataset.n);
+      document.querySelectorAll(".rounds").forEach(x=>x.classList.remove("bg-purple-600"));
+      b.classList.add("bg-purple-600");
+    };
+  });
 
-  const saveTimerBtn = document.getElementById("saveTimer");
-  if (saveTimerBtn) saveTimerBtn.onclick = async ()=>{
-    saveTimerBtn.disabled = true;
-    const r = await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer}).catch(()=>({ok:false}));
-    saveTimerBtn.disabled = false;
+  const saveSettingsBtn = document.getElementById("saveSettings");
+  if (saveSettingsBtn) saveSettingsBtn.onclick = async ()=>{
+    saveSettingsBtn.disabled = true;
+    const r = await postJSON("/api/admin/config", {
+      chat_id, user_id,
+      timer_seconds: chosenTimer,
+      rounds_total: chosenRounds
+    }).catch(()=>({ok:false}));
+    saveSettingsBtn.disabled = false;
     if (r.ok) getState({soft:false});
   };
 
@@ -346,11 +360,16 @@ function renderAdmin(state){
   if (startBtn) startBtn.onclick = async ()=>{
     startBtn.disabled = true;
     try{
-      if (!lastState?.timer_seconds){
-        const c = await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer});
-        if (!c.ok) { startBtn.disabled=false; return; }
-      }
-      const r = await postJSON("/api/admin/start", {chat_id, user_id, timer_seconds: chosenTimer});
+      const c = await postJSON("/api/admin/config", {
+        chat_id, user_id,
+        timer_seconds: chosenTimer,
+        rounds_total: chosenRounds
+      });
+      if (!c.ok) { startBtn.disabled=false; return; }
+      const r = await postJSON("/api/admin/start", {
+        chat_id, user_id,
+        timer_seconds: chosenTimer   // на всякий случай дублируем
+      });
       if (r.ok) getState({soft:false});
     } finally { startBtn.disabled = false; }
   };
@@ -367,7 +386,7 @@ function renderAdmin(state){
 
   const endBtn = document.getElementById("endQuiz");
   if (endBtn) endBtn.onclick = async ()=>{
-    if (!confirm("Завершить квиз и показать результаты?")) return;
+    // 5) без доп. подтверждения
     endBtn.disabled = true;
     try{
       const r = await postJSON("/api/admin/end", {chat_id, user_id});
@@ -401,12 +420,12 @@ function renderPlayer(state){
 
   if (!q){
     app.innerHTML = `
-      <div class="text-center">
+      <div class="p-3 bg-purple-800/30 rounded-lg border border-white/10 text-center">
         <p class="text-xl mb-2">🎮 Квиз ещё не начался!</p>
-        <div class="text-sm text-gray-100">Игроков: ${playersCount}</div>
+        <p class="text-sm text-gray-100">Игроков: ${playersCount}</p>
       </div>
     `;
-    stopLocalTimer();
+    stopLocalTimer(); scrollTop();
     return;
   }
 
@@ -421,13 +440,16 @@ function renderPlayer(state){
   }).join("");
 
   app.innerHTML = `
-    <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
-    <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
-    ${rnd ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
-    <div class="text-sm text-gray-100 mt-2">
-      Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
+    <div class="mt-4 p-3 bg-purple-800/30 rounded-lg border border-white/10">
+      <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
+      <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
+      ${rnd ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
+      <div class="text-sm text-gray-100 mt-2">
+        Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
+      </div>
     </div>
   `;
+  scrollTop();
 
   document.querySelectorAll(".option").forEach(b=>{
     b.onclick = (e)=> submitAnswer(e);
@@ -454,26 +476,38 @@ function renderFinalBoard(board){
     </div>
   `).join("");
 
-  const joinBtn = buttonPrimary("rematchJoin","🔁 Участвовать ещё раз");
+  // 2) Тоггл участия: участвовать ↔ отменить участие
+  const joinToggleBtn = `<button id="rematchToggle" class="w-full py-3 bg-purple-600 rounded-lg hover:bg-purple-700 transition">🔁 Участвовать ещё раз</button>`;
+
+  // 4) "Перезапустить" неактивна до 1 подтверждённого
   const adminPanel = `
     <div id="rematchAdmin" class="mt-4 p-3 bg-purple-900/30 rounded-lg border border-white/10 hidden">
       <div class="text-sm mb-2">Подтвердили участие:</div>
       <div id="rematchList" class="space-y-1 text-sm"></div>
-      <div class="mt-3">${buttonGhost("rematchStart","🚀 Перезапустить квиз")}</div>
+      <div class="mt-3"><button id="rematchStart" class="w-full py-3 bg-purple-800 rounded-lg hover:bg-purple-700 transition" disabled>🚀 Перезапустить квиз</button></div>
     </div>
   `;
 
   app.innerHTML = `
     <h2 class="text-xl mb-4">🏁 Итоги квиза</h2>
     <div class="space-y-2">${rows || "<div>Участников не было 🤷‍♂️</div>"}</div>
-    <div class="mt-6">${joinBtn}</div>
+    <div class="mt-6">${joinToggleBtn}</div>
     ${adminPanel}
   `;
 
-  document.getElementById("rematchJoin").onclick = async ()=>{
-    const name = tg?.initDataUnsafe?.user?.first_name || "Игрок";
-    const r = await postJSON("/api/rematch/join", {chat_id, user_id, name}).catch(()=>({ok:false}));
-    if (r.ok) updateRematchAdminUI();
+  document.getElementById("rematchToggle").onclick = async ()=>{
+    try{
+      // узнаём текущее состояние, чтобы понять — мы в списке или нет
+      const s = await apiRematchState();
+      const inList = s.ok && s.confirmed && s.confirmed[String(user_id)];
+      if (inList){
+        await postJSON("/api/rematch/leave", {chat_id, user_id}).catch(()=>({ok:false}));
+      } else {
+        const name = tg?.initDataUnsafe?.user?.first_name || "Игрок";
+        await postJSON("/api/rematch/join", {chat_id, user_id, name}).catch(()=>({ok:false}));
+      }
+      updateRematchAdminUI();
+    }catch(e){}
   };
 
   updateRematchAdminUI(true);
@@ -484,15 +518,23 @@ async function updateRematchAdminUI(forceShow=false){
   const box = document.getElementById("rematchAdmin");
   if (!box) return;
   if (!data.ok){ box.classList.add("hidden"); return; }
+
+  // показывать админ-панель только админу
   if (forceShow || data.admin_id === user_id) box.classList.remove("hidden"); else box.classList.add("hidden");
+
+  // список подтверждений
   const list = document.getElementById("rematchList");
+  const items = Object.values(data.confirmed || {});
   if (list){
-    const items = Object.values(data.confirmed || {});
     list.innerHTML = items.length ? items.map(n=>`<div>• ${n}</div>`).join("") : "<div>— пока никто</div>";
   }
+
+  // 4) активируем старт только при >=1
   const startBtn = document.getElementById("rematchStart");
   if (startBtn){
+    startBtn.disabled = !(items.length >= 1);
     startBtn.onclick = async ()=>{
+      if (startBtn.disabled) return;
       const r = await postJSON("/api/rematch/start", {chat_id, user_id}).catch(()=>({ok:false}));
       if (r.ok){
         if (rematchTimer){ clearInterval(rematchTimer); rematchTimer=null; }
@@ -500,6 +542,13 @@ async function updateRematchAdminUI(forceShow=false){
         getState({soft:false});
       }
     };
+  }
+
+  // 2) текст кнопки для своего статуса
+  const toggle = document.getElementById("rematchToggle");
+  if (toggle){
+    const inList = data.confirmed && data.confirmed[String(user_id)];
+    toggle.textContent = inList ? "✖️ Отменить участие" : "🔁 Участвовать ещё раз";
   }
 }
 function startRematchWatch(){
@@ -531,7 +580,7 @@ async function getState(opts={}){
     }
     if (!data.ok){ renderLoading("Игра не найдена."); return; }
 
-    // если видим, что раунд уже идёт — на всякий случай снимем оверлей
+    // если видим, что раунд уже идёт — снимем отсчёт
     maybeDismissCountdownByState(data);
 
     // детект нового вопроса
@@ -547,6 +596,10 @@ async function getState(opts={}){
     if (data.rev !== lastRev || !opts.soft || newQuestion){
       lastRev = data.rev;
       lastState = data;
+
+      // подхватываем текущие настройки (если пришли из бекэнда)
+      if (data.timer_seconds) chosenTimer = data.timer_seconds;
+      if (data.rounds_total) chosenRounds = data.rounds_total;
 
       if (data.round && !data.round.finished) startPolling(POLL_INTERVAL_MS);
       else stopPolling();
