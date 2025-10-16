@@ -1,54 +1,55 @@
-/* ===== базовые ===== */
+/* ===== База ===== */
 * { box-sizing: border-box; }
 html, body {
   height: 100%;
   min-height: 100%;
-  background-color: #0b0220; /* фолбэк, фон-картинка ставится из JS */
-  color: #ffffff;
   margin: 0; padding: 0;
+  color: #fff;
+  background-color: #0b0220; /* фолбэк, фоновая картинка задаётся из JS */
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell,
                "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji",
                "Segoe UI Emoji", "Segoe UI Symbol";
 }
 
-/* контейнер */
+/* Контейнер мини-аппа: центр + поля */
 #content {
   position: relative;
   z-index: 1;
   padding: 16px;
-  /* лёгкая общая тень для контента */
-  text-shadow: 0 1px 2px rgba(0,0,0,.55);
-  isolation: isolate; /* чтобы псевдослой был под контентом */
+  max-width: 520px;
+  margin: 0 auto;
+  min-height: 100vh;
 }
 
-/* мягкая виньетка по краям экрана (очень деликатная) */
+/* Небольшой контрастный скрим только под контентом (фон видно!) */
 #content::before {
   content: "";
-  position: fixed;
-  inset: 0;
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg,
+              rgba(0,0,0,0.10) 0%,
+              rgba(0,0,0,0.18) 40%,
+              rgba(0,0,0,0.10) 100%);
   pointer-events: none;
-  z-index: -1;
-  background:
-    radial-gradient(120% 120% at 50% 30%,
-      rgba(6,4,20,0.00) 0%,
-      rgba(6,4,20,0.12) 60%,
-      rgba(6,4,20,0.18) 85%,
-      rgba(6,4,20,0.24) 100%);
+  border-radius: 18px;
 }
 
-/* ===== типографика ===== */
+/* ===== Текст и типографика ===== */
 .text-sm { font-size: 0.92rem; }
-.text-lg { font-size: 1.15rem; }
+.text-lg { font-size: 1.12rem; }
 .text-xl { font-size: 1.32rem; }
 .font-semibold { font-weight: 600; }
 
-h1, h2, h3, .text-xl, .text-lg {
-  text-shadow:
-    0 2px 6px rgba(0,0,0,.35),
-    0 1px 2px rgba(0,0,0,.6);
+/* Лёгкая тень для читаемости на пёстром фоне */
+h1,h2,h3,p,div,button {
+  text-shadow: 0 1px 2px rgba(0,0,0,.45);
 }
 
-/* отступы/паддинги (минимальный набор) */
+/* ===== Сетка и отступы (лайт-утилиты) ===== */
+.grid { display: grid; gap: .6rem; }
+.grid-cols-1 { grid-template-columns: 1fr; }
+.grid-cols-2 { grid-template-columns: 1fr 1fr; }
+.grid-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+.grid-cols-4 { grid-template-columns: repeat(4, 1fr); }
 .mt-2 { margin-top: .5rem; }
 .mt-3 { margin-top: .75rem; }
 .mt-4 { margin-top: 1rem; }
@@ -56,94 +57,79 @@ h1, h2, h3, .text-xl, .text-lg {
 .mb-2 { margin-bottom: .5rem; }
 .mb-3 { margin-bottom: .75rem; }
 .mb-4 { margin-bottom: 1rem; }
-.p-3  { padding: .75rem; }
+.p-3  { padding: .9rem; }
 
-/* сетки */
-.grid { display: grid; gap: .6rem; }
-.grid-cols-1 { grid-template-columns: 1fr; }
-.grid-cols-2 { grid-template-columns: repeat(2, 1fr); }
-.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
-.grid-cols-4 { grid-template-columns: repeat(4, 1fr); }
-
-/* ===== стеклянные панели/кнопки ===== */
-:root {
-  --glass-bg: rgba(18, 12, 40, 0.36);
-  --glass-border: rgba(255,255,255,0.18);
-  --glass-shadow: 0 10px 26px rgba(10, 5, 25, .35);
-}
-
-.bg-purple-900,
-.bg-purple-800,
-.bg-purple-700,
-.bg-purple-600 {
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+/* ===== «Стекло» для панелей и карточек =====
+   Перехватываем все классы, начинающиеся на bg-purple… из разметки */
+[class^="bg-purple"] {
+  background: rgba(20, 12, 40, 0.35);
+  border: 1px solid rgba(255,255,255,0.18);
+  backdrop-filter: blur(8px) saturate(120%);
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
   border-radius: 16px;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  box-shadow: var(--glass-shadow);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
 }
 
+/* ===== Кнопки ===== */
 button {
-  border: 1px solid var(--glass-border);
-  background: rgba(106, 47, 193, 0.55);
-  border-radius: 14px;
-  color: #fff;
+  border: none;
   cursor: pointer;
-  padding: 12px 14px;
-  transition: transform .06s ease, background-color .15s ease, opacity .2s ease;
+  color: #fff;
+  border-radius: 14px;
+  transition: transform .06s ease, filter .15s ease, background-color .15s ease;
+}
+button:hover { filter: brightness(1.06); }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Главная / вторичная — усиливаем контраст, но оставляем просвет */
+.bg-purple-600 { background-color: rgba(120, 80, 200, 0.85); }
+.bg-purple-700 { background-color: rgba(104, 55, 151, 0.75); }
+.bg-purple-800 { background-color: rgba(70, 40, 110, 0.55); }
+.bg-purple-900 { background-color: rgba(30, 20, 55, 0.45); }
+
+/* ===== Варианты ответа ===== */
+.option {
+  background: rgba(96, 58, 158, 0.60);
+  border: 1px solid rgba(255,255,255,0.20);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-}
-button:hover { background: rgba(126, 67, 213, 0.62); }
-button:active { transform: translateY(1px) scale(0.997); }
-button:disabled { opacity: .6; cursor: not-allowed; }
-
-/* вариации, чтобы не ломать существующие классы */
-.bg-purple-600 { background: rgba(126, 67, 213, 0.65); }
-.bg-purple-700 { background: rgba(106, 47, 193, 0.55); }
-.bg-purple-800 { background: rgba(18, 12, 40, 0.42); }
-.bg-purple-900 { background: rgba(18, 12, 40, 0.36); }
-
-/* ===== варианты ответов ===== */
-.option {
-  background: rgba(106, 47, 193, 0.40);
-  border: 1px solid var(--glass-border);
   border-radius: 18px;
   padding: 14px 16px;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  box-shadow: 0 8px 18px rgba(8, 3, 20, .28);
-  transition: background-color .15s ease, transform .06s ease;
+  font-size: 1.05rem;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+  transition: background-color .15s ease, transform .06s ease, box-shadow .15s ease;
 }
-.option:hover { background: rgba(126, 67, 213, 0.48); }
-.option:active { transform: scale(0.996); }
+.option:hover { background: rgba(110, 70, 180, 0.66); }
+.option:active { transform: translateY(1px); }
 .option[disabled] { opacity: .85; }
 
-/* правильный ответ после завершения раунда */
+/* Правильный ответ — ярче, но не «ядовито» */
 .bg-green-700 {
-  background: rgba(39, 201, 111, 0.70) !important;
-  border-color: rgba(255,255,255,0.22) !important;
-  color: #fff;
-  text-shadow: 0 1px 2px rgba(0,0,0,.6);
+  background: rgba(34, 197, 94, 0.80) !important;
+  border-color: rgba(255,255,255,0.25) !important;
+  box-shadow: 0 10px 26px rgba(34, 197, 94, 0.25);
 }
 
-/* ===== прогресс-бар ===== */
-.w-full.bg-purple-900\/40 {
-  background: rgba(255,255,255,0.22) !important;
-}
-#timerBar {
-  background: linear-gradient(90deg, rgba(190, 165, 255, .95), rgba(150, 110, 255, .95)) !important;
-  box-shadow: 0 2px 8px rgba(150,110,255,.45);
-}
-#timerRemain {
-  color: #f1ecff;
-  text-shadow: 0 1px 2px rgba(0,0,0,.7);
+/* ===== Прогресс-бар ===== */
+.w-full { width: 100%; }
+.h-3 { height: 12px; }
+.rounded-full { border-radius: 999px; }
+
+.bg-purple-900\/40 { background-color: rgba(30, 20, 55, 0.40); }
+.bg-purple-400 { background-color: rgba(189, 147, 249, 0.95); }
+
+/* Если классы тайлвинда с / не применяются, резерв: */
+div[style*="bg-purple-900/40"] { background-color: rgba(30,20,55,0.40) !important; }
+
+/* ===== Мелкие улучшения читабельности ===== */
+hr, .divider {
+  border: none; height: 1px; width: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.25), transparent);
+  margin: .75rem 0;
 }
 
-/* мелкий декор */
-.border { border: 1px solid var(--glass-border); }
-.rounded-lg { border-radius: 16px; }
-
-/* чтобы крупные картинки фона не «выедали» текст на белых пятнах */
-::selection { background: rgba(150,110,255,.45); color: #fff; }
+/* Подписи/мелкий текст чуть контрастнее */
+.text-gray-100, .text-gray-200 {
+  color: rgba(255,255,255,0.92);
+}
