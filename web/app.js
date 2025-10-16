@@ -7,12 +7,12 @@ const user_id = parseInt(params.get("user_id"));
 
 const app = document.getElementById("content");
 
-// === Константы синхронизации и UX ===
+// === Константы ===
 const POLL_INTERVAL_MS = 3000;
 const DEADLINE_SLOP_MS = 300;
 const LOCAL_TIMER_MS = 250;
 const COUNTDOWN_SEC = 3;
-const OPTIONS_MIN_HEIGHT_PX = 260; // стабилизируем высоту сетки вариантов
+const OPTIONS_MIN_HEIGHT_PX = 260;
 
 let lastState = null;
 let lastRev = null;
@@ -24,28 +24,31 @@ let localTimer = null;
 let rematchTimer = null;
 
 let pendingAction = false;
-let chosenTimer = 30; // дефолт до сохранения админом
-let countdownUntil = null; // timestamp конца обратного отсчёта
-let currentBg = null;      // текущий URL фона
-let netBadge = null;       // индикатор сети
+let chosenTimer = 30;
 
-// ====== Утилиты ======
-function nowSec() { return Date.now()/1000; }
-function fmtSec(s) {
+let countdownUntil = null;      // unix-секунды до конца отсчёта
+let countdownTicker = null;     // requestAnimationFrame id
+let currentBg = null;           // текущий фон
+
+// ===== Утилиты =====
+function nowSec(){ return Date.now()/1000; }
+function fmtSec(s){
   s = Math.max(0, Math.floor(s));
-  const m = Math.floor(s/60);
-  const r = s%60;
+  const m = Math.floor(s/60), r = s%60;
   return m>0 ? `${m}:${String(r).padStart(2,"0")}` : `${r}с`;
 }
+
+// Лёгкий оверлей и сетевой бэйдж
+let netBadge = null;
 function ensureOverlay(){
-  // градиент/затемнение для контраста + индикатор сети
   if (!document.getElementById("bg-shade")){
     const shade = document.createElement("div");
     shade.id = "bg-shade";
     Object.assign(shade.style, {
-      position: "fixed", inset: "0", pointerEvents: "none",
-      background: "linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,.65) 100%)",
-      zIndex: "0"
+      position:"fixed", inset:"0", pointerEvents:"none",
+      // было слишком темно — делаем легче
+      background: "linear-gradient(180deg, rgba(0,0,0,.22) 0%, rgba(0,0,0,.38) 100%)",
+      zIndex:"0"
     });
     document.body.appendChild(shade);
   }
@@ -54,27 +57,25 @@ function ensureOverlay(){
     netBadge.id = "net-badge";
     netBadge.textContent = "Проблемы со связью…";
     Object.assign(netBadge.style, {
-      position: "fixed", top: "8px", right: "8px",
-      background: "rgba(255,255,255,.08)",
-      border: "1px solid rgba(255,255,255,.18)",
-      backdropFilter: "blur(6px)",
-      padding: "6px 10px", borderRadius: "10px",
-      fontSize: "12px", color: "#fff",
-      opacity: "0", transition: "opacity .2s ease",
-      zIndex: "1000"
+      position:"fixed", top:"8px", right:"8px",
+      background:"rgba(255,255,255,.08)",
+      border:"1px solid rgba(255,255,255,.18)",
+      backdropFilter:"blur(6px)",
+      padding:"6px 10px", borderRadius:"10px",
+      fontSize:"12px", color:"#fff",
+      opacity:"0", transition:"opacity .2s ease",
+      zIndex:"1000", pointerEvents:"none"
     });
     document.body.appendChild(netBadge);
   }
 }
-function showNetBadge(on){
-  if (!netBadge) return;
-  netBadge.style.opacity = on ? "1" : "0";
-}
+function showNetBadge(on){ if (netBadge) netBadge.style.opacity = on ? "1" : "0"; }
+
+// Надёжная смена фона (с предзагрузкой)
 function setBackground(url){
   ensureOverlay();
-  // если нет новой картинки — не трогаем фон, чтобы не было чёрного экрана
-  if (!url) return;
-  if (url === currentBg) return;
+  if (!url) return;                 // без url — оставляем прежний фон
+  if (url === currentBg) return;    // тот же — ничего не делаем
   const img = new Image();
   img.onload = () => {
     currentBg = url;
@@ -87,40 +88,33 @@ function setBackground(url){
   img.src = url;
 }
 
-function progressBar(remain, total) {
+function progressBar(remain, total){
   const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
   return `
-    <div class="w-full bg-purple-900/50 rounded-full h-3">
+    <div class="w-full bg-purple-900/40 rounded-full h-3">
       <div id="timerBar" class="h-3 rounded-full bg-purple-400 transition-all" style="width:${pct}%"></div>
     </div>
     <div id="timerRemain" class="text-xs text-gray-200 mt-1">Осталось: ${fmtSec(remain)}</div>
   `;
 }
-function buttonPrimary(id, label, disabled=false) {
+function buttonPrimary(id, label, disabled=false){
   return `<button id="${id}" class="w-full py-3 bg-purple-600 rounded-lg hover:bg-purple-700 transition disabled:opacity-50 disabled:cursor-not-allowed" ${disabled?'disabled':''}>${label}</button>`;
 }
-function buttonGhost(id, label, disabled=false) {
+function buttonGhost(id, label, disabled=false){
   return `<button id="${id}" class="w-full py-3 bg-purple-800 rounded-lg hover:bg-purple-700 transition disabled:opacity-50 disabled:cursor-not-allowed" ${disabled?'disabled':''}>${label}</button>`;
 }
-function optionButton(text, idx, disabled=false, correct=false) {
-  const base = "option py-3 px-4 rounded-lg transition text-left";
-  let bg = "bg-purple-700 hover:bg-purple-600";
+function optionButton(text, idx, disabled=false, correct=false){
+  const base="option py-3 px-4 rounded-lg transition text-left";
+  let bg="bg-purple-700 hover:bg-purple-600";
   if (correct) bg = "bg-green-700";
   if (disabled) bg += " opacity-70 cursor-not-allowed";
   return `<button class="${base} ${bg}" data-idx="${idx}" ${disabled?'disabled':''}>${text}</button>`;
 }
-function renderLoading(msg="Загрузка..."){
-  app.innerHTML = `<p class="text-lg">${msg}</p>`;
-}
+function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
 
-// ====== Поллинг / таймеры ======
-function startPolling(intervalMs=POLL_INTERVAL_MS){
-  if (pollTimer) return;
-  pollTimer = setInterval(()=> getState({soft:true}), intervalMs);
-}
-function stopPolling(){
-  if (pollTimer){ clearInterval(pollTimer); pollTimer = null; }
-}
+// ===== Поллинг и таймеры =====
+function startPolling(i=POLL_INTERVAL_MS){ if (!pollTimer) pollTimer = setInterval(()=>getState({soft:true}), i); }
+function stopPolling(){ if (pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
 function setDeadlineTimer(deadline){
   if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
   const delay = Math.max(0, (deadline - nowSec())*1000 + DEADLINE_SLOP_MS);
@@ -138,35 +132,27 @@ function startLocalTimer(deadline, total){
     if (remain <= 0) stopLocalTimer();
   }, LOCAL_TIMER_MS);
 }
-function stopLocalTimer(){
-  if (localTimer){ clearInterval(localTimer); localTimer = null; }
-}
+function stopLocalTimer(){ if (localTimer){ clearInterval(localTimer); localTimer=null; } }
 
-// ====== API helpers (с ретраями для POST) ======
+// ===== API helpers (POST с ретраями) =====
 async function apiGetState(signal){
   const res = await fetch(`/api/get_state?chat_id=${chat_id}&user_id=${user_id}`, { signal });
   return res.json();
 }
 async function postJSON(url, body, {retries=2}={}){
-  let attempt = 0;
-  while (true){
+  let attempt=0;
+  while(true){
     try{
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify(body)
-      });
+      const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
       const data = await res.json();
-      if (!data.ok) throw new Error("server returned not ok");
+      if (!data.ok) throw new Error("server not ok");
       return data;
     }catch(e){
-      if (attempt >= retries) throw e;
-      attempt++;
-      showNetBadge(true);
-      await new Promise(r=>setTimeout(r, 300*attempt)); // бэкофф
+      if (attempt>=retries) throw e;
+      attempt++; showNetBadge(true);
+      await new Promise(r=>setTimeout(r, 300*attempt));
     }finally{
-      if (attempt === 0) showNetBadge(false);
-      else setTimeout(()=>showNetBadge(false), 400);
+      if (attempt===0) showNetBadge(false); else setTimeout(()=>showNetBadge(false), 400);
     }
   }
 }
@@ -175,35 +161,65 @@ async function apiRematchState(){
   return res.json();
 }
 
-// ====== Рендеры ======
-function renderAdmin(state){
-  const rnd = state.round;
-  const q = state.question;
-  const playersCount = Object.keys(state.players||{}).length;
+// ===== Обратный отсчёт (неблокирующий) =====
+function clearCountdown(){
+  countdownUntil = null;
+  if (countdownTicker) cancelAnimationFrame(countdownTicker);
+  const chip = document.getElementById("countdownChip");
+  if (chip) chip.remove();
+}
+function startCountdown(sec=COUNTDOWN_SEC){
+  clearCountdown();
+  countdownUntil = nowSec() + sec;
+  const box = document.getElementById("optionsBox");
+  if (!box) return; // покажется на следующем рендере
+  const chip = document.createElement("div");
+  chip.id = "countdownChip";
+  chip.className = "inline-block px-3 py-1 rounded-full bg-purple-900/60 border border-white/20 text-sm text-gray-100 mb-2";
+  chip.style.userSelect = "none";
+  chip.textContent = `Начинаем через: ${sec}`;
+  box.parentElement.insertBefore(chip, box); // над вариантами
 
-  // показываем блок таймера И кнопку «Начать…» только до первого раунда
-  const firstScreen = !state.round;
+  const tick = ()=>{
+    if (!countdownUntil){ if (chip) chip.remove(); return; }
+    const left = Math.ceil(countdownUntil - nowSec());
+    if (left > 0){
+      chip.textContent = `Начинаем через: ${left}`;
+      countdownTicker = requestAnimationFrame(tick);
+    } else {
+      // Авто-снятие
+      clearCountdown();
+    }
+  };
+  countdownTicker = requestAnimationFrame(tick);
+}
+
+// ===== Рендеры =====
+function renderAdmin(state){
+  const rnd = state.round, q = state.question;
+  const playersCount = Object.keys(state.players||{}).length;
+  const firstScreen = !state.round;  // панели таймера — только до первого раунда
 
   const timerBlock = firstScreen ? `
-      <div class="p-3 bg-purple-900 rounded-lg space-y-2">
-        <div class="text-sm text-gray-300">Таймер вопроса (сек):</div>
-        <div class="grid grid-cols-4 gap-2">
-          ${[15,30,45,60].map(s => `
-            <button class="timer btn py-2 rounded-lg ${state.timer_seconds===s?'bg-purple-600':'bg-purple-800 hover:bg-purple-700'}" data-s="${s}">${s}</button>
-          `).join("")}
-        </div>
-        ${buttonPrimary("saveTimer","💾 Сохранить таймер", pendingAction)}
+    <div class="p-3 bg-purple-900/60 rounded-lg space-y-2 border border-white/10">
+      <div class="text-sm text-gray-200">Таймер вопроса (сек):</div>
+      <div class="grid grid-cols-4 gap-2">
+        ${[15,30,45,60].map(s=>`
+          <button class="timer btn py-2 rounded-lg ${state.timer_seconds===s?'bg-purple-600':'bg-purple-800 hover:bg-purple-700'}" data-s="${s}">${s}</button>
+        `).join("")}
       </div>
+      ${buttonPrimary("saveTimer","💾 Сохранить таймер", pendingAction)}
+    </div>
   ` : "";
 
   const controls = `
-    <div class="p-3 bg-purple-900 rounded-lg space-y-2 mt-3">
+    <div class="p-3 bg-purple-900/60 rounded-lg space-y-2 mt-3 border border-white/10">
       <div class="grid ${firstScreen ? 'grid-cols-1' : 'grid-cols-2'} gap-2">
-        ${firstScreen ? buttonPrimary("startRound","▶ Начать квиз / вопрос", pendingAction) : ""}
+        ${firstScreen ? buttonPrimary("startRound","▶ Начать квиз", pendingAction) : ""}
         ${buttonGhost("nextRound","⏭ Следующий вопрос", pendingAction || !state.round || !state.round.finished)}
         ${buttonGhost("endQuiz","🛑 Завершить квиз", pendingAction)}
       </div>
-      <div class="text-xs text-gray-400">Админ тоже может отвечать.</div>
+      <div class="text-xs text-gray-200">Админ тоже может отвечать.</div>
     </div>
   `;
 
@@ -212,22 +228,16 @@ function renderAdmin(state){
     body = `
       <div class="text-center">
         <p class="text-xl mb-2">⏳ Вопрос ещё не начат.</p>
-        <p class="text-sm text-gray-300">Игроков: ${playersCount}</p>
+        <p class="text-sm text-gray-200">Игроков: ${playersCount}</p>
       </div>
     `;
-  }else{
-    // обратный отсчёт
-    const underCountdown = countdownUntil && nowSec() < countdownUntil;
-    const remain = Math.max(0, (rnd?.deadline || 0) - nowSec());
-    const total = (state.timer_seconds || 1);
-
-    const optsHtml = underCountdown
-      ? `<div class="text-center text-3xl py-10" id="cd">Начинаем через…</div>`
-      : q.options.map((opt, i) => {
-          const correct = rnd?.finished ? (i === q.answer) : false;
-          return optionButton(opt, i, isAnswered(state), correct);
-        }).join("");
-
+  } else {
+    const remain = Math.max(0, (rnd?.deadline||0) - nowSec());
+    const total = (state.timer_seconds||1);
+    const optsHtml = q.options.map((opt,i)=>{
+      const correct = rnd?.finished ? (i===q.answer) : false;
+      return optionButton(opt, i, isAnswered(state) || (countdownUntil && nowSec()<countdownUntil), correct);
+    }).join("");
     body = `
       <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
       <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
@@ -236,7 +246,6 @@ function renderAdmin(state){
         Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
       </div>
     `;
-
     if (q.image) setBackground(q.image);
   }
 
@@ -244,12 +253,12 @@ function renderAdmin(state){
     <h2 class="text-xl mb-4">👑 Панель администратора</h2>
     ${timerBlock}
     ${controls}
-    <div class="mt-4 p-3 bg-purple-800/40 rounded-lg">${body}</div>
+    <div class="mt-4 p-3 bg-purple-800/35 rounded-lg border border-white/10">${body}</div>
   `;
 
   // handlers
   document.querySelectorAll(".timer").forEach(b=>{
-    b.onclick = () => {
+    b.onclick = ()=>{
       chosenTimer = parseInt(b.dataset.s);
       document.querySelectorAll(".timer").forEach(x=>x.classList.remove("bg-purple-600"));
       b.classList.add("bg-purple-600");
@@ -258,56 +267,59 @@ function renderAdmin(state){
 
   const saveTimerBtn = document.getElementById("saveTimer");
   if (saveTimerBtn) saveTimerBtn.onclick = async ()=>{
-    pendingAction = true; renderAdmin(state);
+    // не перерендериваем мгновенно, чтобы не терять клики
+    saveTimerBtn.disabled = true;
     try{
       await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer});
     }catch(e){} finally{
-      pendingAction = false; getState({soft:false});
+      saveTimerBtn.disabled = false;
+      getState({soft:false});
     }
   };
 
   const startBtn = document.getElementById("startRound");
   if (startBtn) startBtn.onclick = async ()=>{
-    pendingAction = true; renderAdmin(state);
+    startBtn.disabled = true;
     try{
       if (!lastState?.timer_seconds){
         await postJSON("/api/admin/config", {chat_id, user_id, timer_seconds: chosenTimer});
       }
       await postJSON("/api/admin/start", {chat_id, user_id, timer_seconds: chosenTimer});
-      // ставим обратный отсчёт
-      countdownUntil = nowSec() + COUNTDOWN_SEC;
+      startCountdown();                       // ненавязчивый отсчёт
       tg?.HapticFeedback?.notificationOccurred?.('success');
     }catch(e){} finally{
-      pendingAction = false; getState({soft:false});
+      startBtn.disabled = false;
+      getState({soft:false});
     }
   };
 
   const nextBtn = document.getElementById("nextRound");
   if (nextBtn) nextBtn.onclick = async ()=>{
-    pendingAction = true; renderAdmin(state);
+    if (nextBtn.disabled) return;
+    nextBtn.disabled = true;
     try{
       await postJSON("/api/admin/next", {chat_id, user_id});
-      countdownUntil = nowSec() + COUNTDOWN_SEC;
+      startCountdown();
       tg?.HapticFeedback?.impactOccurred?.('medium');
     }catch(e){} finally{
-      pendingAction = false; getState({soft:false});
+      nextBtn.disabled = false;
+      getState({soft:false});
     }
   };
 
   const endBtn = document.getElementById("endQuiz");
   if (endBtn) endBtn.onclick = async ()=>{
+    if (endBtn.disabled) return;
     if (!confirm("Завершить квиз и показать результаты?")) return;
-    pendingAction = true; renderAdmin(state);
+    endBtn.disabled = true;
     try{
       const r = await postJSON("/api/admin/end", {chat_id, user_id});
-      stopPolling(); stopLocalTimer();
+      stopPolling(); stopLocalTimer(); clearCountdown();
       renderFinalBoard(r.leaderboard || []);
       startRematchWatch();
       tg?.HapticFeedback?.notificationOccurred?.('success');
-    }catch(e){
-      getState({soft:false});
-    }finally{
-      pendingAction = false;
+    }catch(e){} finally{
+      endBtn.disabled = false;
     }
   };
 
@@ -316,56 +328,39 @@ function renderAdmin(state){
   });
 
   if (state.round && !state.round.finished){
-    // локальный таймер
     startLocalTimer(state.round.deadline, state.timer_seconds || 1);
-    // анимация обратного отсчёта, если активен
-    if (countdownUntil && nowSec() < countdownUntil){
-      const cdEl = document.getElementById("cd");
-      const tick = ()=>{
-        if (!cdEl) return;
-        const remain = Math.ceil(countdownUntil - nowSec());
-        if (remain > 0){
-          cdEl.textContent = `Начинаем через: ${remain}`;
-          requestAnimationFrame(tick);
-        } else {
-          // перерисуем, чтобы показать варианты
-          countdownUntil = null;
-          getState({soft:false});
-        }
-      };
-      tick();
-    }
+    // если в момент рендера отсчёт активен — убедимся, что чип существует
+    if (countdownUntil && nowSec()<countdownUntil) startCountdown(Math.ceil(countdownUntil - nowSec()));
   } else {
     stopLocalTimer();
+    clearCountdown();
   }
 }
 
 function renderPlayer(state){
-  const rnd = state.round;
-  const q = state.question;
+  const rnd = state.round, q = state.question;
   const playersCount = Object.keys(state.players||{}).length;
 
   if (!q){
     app.innerHTML = `
       <div class="text-center">
         <p class="text-xl mb-2">⏳ Ждём начала вопроса...</p>
-        <div class="text-sm text-gray-300">Игроков: ${playersCount}</div>
+        <div class="text-sm text-gray-200">Игроков: ${playersCount}</div>
       </div>
     `;
-    stopLocalTimer();
+    stopLocalTimer(); clearCountdown();
     return;
   }
 
-  const underCountdown = countdownUntil && nowSec() < countdownUntil;
-  const remain = Math.max(0, (rnd?.deadline || 0) - nowSec());
-  const total = (state.timer_seconds || 1);
+  const remain = Math.max(0, (rnd?.deadline||0) - nowSec());
+  const total = (state.timer_seconds||1);
 
-  const optsHtml = underCountdown
-    ? `<div class="text-center text-3xl py-10" id="cd">Начинаем через…</div>`
-    : q.options.map((opt, i) => {
-        const correct = rnd?.finished ? (i === q.answer) : false;
-        return optionButton(opt, i, isAnswered(state), correct);
-      }).join("");
+  const optsHtml = q.options.map((opt,i)=>{
+    const correct = rnd?.finished ? (i===q.answer) : false;
+    // во время отсчёта клики отключены, но варианты видны
+    const disabled = isAnswered(state) || (countdownUntil && nowSec()<countdownUntil);
+    return optionButton(opt, i, disabled, correct);
+  }).join("");
 
   app.innerHTML = `
     <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
@@ -384,34 +379,19 @@ function renderPlayer(state){
 
   if (state.round && !state.round.finished){
     startLocalTimer(state.round.deadline, state.timer_seconds || 1);
-
-    if (underCountdown){
-      const cdEl = document.getElementById("cd");
-      const tick = ()=>{
-        if (!cdEl) return;
-        const r = Math.ceil(countdownUntil - nowSec());
-        if (r > 0){
-          cdEl.textContent = `Начинаем через: ${r}`;
-          requestAnimationFrame(tick);
-        } else {
-          countdownUntil = null;
-          getState({soft:false});
-        }
-      };
-      tick();
-    }
+    if (countdownUntil && nowSec()<countdownUntil) startCountdown(Math.ceil(countdownUntil - nowSec()));
   } else {
     stopLocalTimer();
-    // лёгкая вибрация при открытии правильного ответа
+    clearCountdown();
     if (q.answer !== undefined) tg?.HapticFeedback?.impactOccurred?.('light');
   }
 }
 
 function renderFinalBoard(board){
-  stopLocalTimer();
-  const medals = ["🥇","🥈","🥉"];
-  const rows = (board||[]).map((it, idx)=>`
-    <div class="flex items-center justify-between py-2 px-3 bg-purple-900/50 rounded-lg">
+  stopLocalTimer(); clearCountdown();
+  const medals=["🥇","🥈","🥉"];
+  const rows = (board||[]).map((it,idx)=>`
+    <div class="flex items-center justify-between py-2 px-3 bg-purple-900/45 rounded-lg border border-white/10">
       <div>${medals[idx] || "🎖️"}</div>
       <div class="font-semibold">${it.name}</div>
       <div>${it.score} балл(ов)</div>
@@ -421,7 +401,7 @@ function renderFinalBoard(board){
 
   const joinBtn = buttonPrimary("rematchJoin","🔁 Участвовать ещё раз");
   const adminPanel = `
-    <div id="rematchAdmin" class="mt-4 p-3 bg-purple-900 rounded-lg hidden">
+    <div id="rematchAdmin" class="mt-4 p-3 bg-purple-900/50 rounded-lg border border-white/10 hidden">
       <div class="text-sm mb-2">Подтвердили участие:</div>
       <div id="rematchList" class="space-y-1 text-sm"></div>
       <div class="mt-3">${buttonGhost("rematchStart","🚀 Перезапустить квиз")}</div>
@@ -451,12 +431,8 @@ async function updateRematchAdminUI(forceShow=false){
   const data = await apiRematchState();
   const box = document.getElementById("rematchAdmin");
   if (!box) return;
-  if (!data.ok) { box.classList.add("hidden"); return; }
-  if (forceShow || data.admin_id === user_id){
-    box.classList.remove("hidden");
-  } else {
-    box.classList.add("hidden");
-  }
+  if (!data.ok){ box.classList.add("hidden"); return; }
+  if (forceShow || data.admin_id === user_id) box.classList.remove("hidden"); else box.classList.add("hidden");
   const list = document.getElementById("rematchList");
   if (list){
     const items = Object.values(data.confirmed || {});
@@ -475,13 +451,12 @@ async function updateRematchAdminUI(forceShow=false){
     };
   }
 }
-
 function startRematchWatch(){
   if (rematchTimer) clearInterval(rematchTimer);
   rematchTimer = setInterval(updateRematchAdminUI, 2000);
 }
 
-// ====== Синхронизация состояния ======
+// ===== Синхронизация =====
 async function getState(opts={}){
   if (inFlight) return;
   try{
@@ -492,46 +467,44 @@ async function getState(opts={}){
     const data = await apiGetState(lastAbort.signal);
 
     if (data.ended){
-      stopPolling();
-      stopLocalTimer();
+      stopPolling(); stopLocalTimer(); clearCountdown();
       const rs = await apiRematchState();
       if (rs.ok){
         renderFinalBoard(rs.leaderboard || []);
         startRematchWatch();
-      } else {
+      }else{
         renderLoading("Квиз завершён.");
       }
       return;
     }
     if (!data.ok){ renderLoading("Игра не найдена."); return; }
 
-    // если начался НОВЫЙ раунд (смена rev и появился другой вопрос) — ставим обратный отсчёт
-    const newQuestionAppeared = (data.round && (!lastState?.round || data.round.started_at !== lastState.round.started_at));
-    if (newQuestionAppeared){
-      countdownUntil = nowSec() + COUNTDOWN_SEC;
-    }
+    // Новый вопрос? — запускаем краткий отсчёт (но не блокируем интерфейс)
+    const newQuestion = data.round && (!lastState?.round || data.round.started_at !== lastState.round.started_at);
+    if (newQuestion) startCountdown();
 
     if (data.rev !== lastRev || !opts.soft){
-      lastRev = data.rev;
-      lastState = data;
+      lastRev = data.rev; lastState = data;
 
       if (data.round && !data.round.finished) startPolling(POLL_INTERVAL_MS);
       else stopPolling();
 
-      if (data.round && !data.round.finished){
-        setDeadlineTimer(data.round.deadline);
-      }else{
-        if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
-      }
+      if (data.round && !data.round.finished) setDeadlineTimer(data.round.deadline);
+      else if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
 
       if (data.role === "admin") renderAdmin(data);
       else renderPlayer(data);
     }
   }catch(e){
-    // игнорируем AbortError
+    // молча игнорируем AbortError
   }finally{
     inFlight = false;
   }
+}
+
+function isAnswered(state){
+  const me = state.players?.[String(user_id)];
+  return !!me?.answered;
 }
 
 async function submitAnswer(e){
@@ -539,11 +512,7 @@ async function submitAnswer(e){
   if (isNaN(idx)) return;
   document.querySelectorAll(".option").forEach(b=>b.setAttribute("disabled","disabled"));
   try{
-    await postJSON("/api/submit", {
-      chat_id,
-      user: { id: user_id },
-      given: idx
-    });
+    await postJSON("/api/submit", { chat_id, user: { id: user_id }, given: idx });
     tg?.HapticFeedback?.impactOccurred?.('light');
     getState({soft:false});
   }catch(err){
@@ -551,7 +520,7 @@ async function submitAnswer(e){
   }
 }
 
-// ====== Точка входа ======
+// ===== Точка входа =====
 if (Number.isNaN(chat_id) || Number.isNaN(user_id)) {
   app.innerHTML = `
     <div class="text-center">
