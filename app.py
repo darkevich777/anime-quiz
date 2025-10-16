@@ -10,9 +10,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
-WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://anime-quiz-hxkb.onrender.com/web/")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # не используется для фиксации, но оставим
-
+WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://example.com/web/")  # ВАШ публичный URL c /web/
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 app = Flask(__name__, static_url_path='', static_folder='web')
 
@@ -29,7 +27,7 @@ def serve_web(path):
 def serve_web_index():
     return app.send_static_file('index.html')
 
-# Вебхук для Telegram (опционально — зависит от хостинга)
+# Вебхук для Telegram (если используете вебхук)
 @app.route('/webhook/', methods=['POST', 'GET'])
 def webhook_handler():
     if request.method == 'POST':
@@ -143,24 +141,18 @@ def generate_question():
             "correct_text": correct
         }
 
-    # на всякий случай — перегенерируем
     return generate_question()
 
-# === Состояния игры ===
-# Структура:
+# === Состояние игры ===
 # chat_id: {
 #   players: { uid: { name, answered(bool), dm_ok(bool), total_time(float), last_answer_time(float|None) } },
 #   scores: { uid: int },
 #   admin_id: int|None,
 #   quiz_started: bool,
-#   locked: bool,                # заморозка состава после начала
-#   timer_seconds: int|None,     # выбран админом перед стартом
-#   round: {
-#       q: dict,
-#       started_at: float (epoch),
-#       deadline: float (epoch),
-#       finished: bool
-#   } | None
+#   locked: bool,
+#   timer_seconds: int|None,
+#   round: { q, started_at, deadline, finished } | None,
+#   rev: int
 # }
 game_states = {}
 
@@ -173,9 +165,13 @@ def ensure_chat_state(chat_id):
             "quiz_started": False,
             "locked": False,
             "timer_seconds": None,
-            "round": None
+            "round": None,
+            "rev": 0
         }
     return game_states[chat_id]
+
+def bump_rev(gs):
+    gs["rev"] = gs.get("rev", 0) + 1
 
 def deep_link(bot_username, chat_id):
     return f"https://t.me/{bot_username}?start=join_{chat_id}"
@@ -188,42 +184,26 @@ def send_webapp_button_to_user(user_id, chat_id):
     bot.send_message(user_id, "Открываем квиз! Нажмите кнопку ниже:", reply_markup=markup)
 
 def finalize_round_if_needed(gs, chat_id):
-    """
-    Закрывает раунд, если все ответили или таймер истёк.
-    Начисляет «штрафное» время тем, кто не ответил (целая длительность).
-    Отправляет подсказку о правильном ответе в группу.
-    """
+    """Закрывает раунд, если все ответили или таймер истёк. Сообщения в чат не отправляет (всё во фронте)."""
     rnd = gs["round"]
     if not rnd or rnd["finished"]:
         return
-
     now = time.time()
     all_answered = all(p["answered"] for p in gs["players"].values())
     timeout = now >= rnd["deadline"]
     if not all_answered and not timeout:
         return
 
-    # Закрываем раунд
+    # Закрываем
     rnd["finished"] = True
-
-    # Добавить время тем, кто не ответил
     dur = gs["timer_seconds"] or 0
     for uid, p in gs["players"].items():
         if not p["answered"]:
             p["last_answer_time"] = None
-            # «затраченное время» = полный таймер
             p["total_time"] += dur
-
-    # Сообщение в чате о правильном ответе
-    q = rnd["q"]
-    bot.send_message(
-        chat_id,
-        f"🟩 Раунд завершён!\n"
-        f"✅ Правильный ответ: *{q['correct_text']}*"
-    )
+    bump_rev(gs)
 
 def compute_leaderboard(gs):
-    # возвращает список [(uid, name, score, total_time)], отсортированный по очкам desc, времени asc
     items = []
     for uid, p in gs["players"].items():
         items.append((uid, p["name"], gs["scores"].get(uid, 0), round(p.get("total_time", 0.0), 3)))
@@ -236,9 +216,6 @@ def medals_for_position(pos):
 # === Команды бота ===
 @bot.message_handler(commands=['start'])
 def start_cmd(msg):
-    """
-    Обработка deep-link /start join_<chatId> для завершения регистрации из группы.
-    """
     text = msg.text or ""
     if "join_" in text:
         try:
@@ -246,18 +223,16 @@ def start_cmd(msg):
         except Exception:
             bot.send_message(msg.chat.id, "Не удалось понять, из какой группы вы регистрируетесь.")
             return
-
         gs = ensure_chat_state(chat_id)
-        uid = msg.from_user.id
-        name = msg.from_user.first_name or "Игрок"
-
         if gs["locked"]:
             bot.send_message(msg.chat.id, "Квиз уже начался, новых участников добавить нельзя.")
             return
-
+        uid = msg.from_user.id
+        name = msg.from_user.first_name or "Игрок"
         if uid not in gs["players"]:
             gs["players"][uid] = {"name": name, "answered": False, "dm_ok": True, "total_time": 0.0, "last_answer_time": None}
             gs["scores"][uid] = 0
+            bump_rev(gs)
             bot.send_message(msg.chat.id, f"Отлично, {name}! Вы зарегистрированы в квизе.")
             try:
                 bot.send_message(chat_id, f"✅ {name} теперь в игре!")
@@ -265,32 +240,26 @@ def start_cmd(msg):
                 pass
         else:
             gs["players"][uid]["dm_ok"] = True
+            bump_rev(gs)
             bot.send_message(msg.chat.id, "Вы уже зарегистрированы. Удачи!")
 
 @bot.message_handler(commands=["register"])
 def register(msg):
-    """
-    Регистрация из группы. Если в ЛС написать нельзя — даём deep-link в группу.
-    """
     chat_id = msg.chat.id
     if msg.chat.type not in ("group", "supergroup"):
         bot.send_message(chat_id, "Команда /register предназначена для группового чата.")
         return
-
     gs = ensure_chat_state(chat_id)
-
     if gs["locked"]:
         bot.send_message(chat_id, "Квиз уже начался. Новых участников добавить нельзя.")
         return
 
     uid = msg.from_user.id
     name = msg.from_user.first_name or "Игрок"
-
     if uid in gs["players"]:
         bot.send_message(chat_id, f"{name}, ты уже участвуешь!")
         return
 
-    # пробуем отправить ЛС, чтобы проверить, открыт ли диалог
     bot_username = bot.get_me().username
     try:
         bot.send_message(uid, "Привет! Вы зарегистрированы в квизе. Ожидайте начала игры.")
@@ -300,6 +269,7 @@ def register(msg):
 
     gs["players"][uid] = {"name": name, "answered": False, "dm_ok": dm_ok, "total_time": 0.0, "last_answer_time": None}
     gs["scores"][uid] = 0
+    bump_rev(gs)
 
     if dm_ok:
         bot.send_message(chat_id, f"✅ {name} зарегистрировался(лась).")
@@ -307,8 +277,7 @@ def register(msg):
         link = deep_link(bot_username, chat_id)
         bot.send_message(
             chat_id,
-            f"ℹ️ {name}, открой личный чат с ботом, чтобы участвовать: {link}\n"
-            f"После нажатия *Start* вы будете добавлены автоматически."
+            f"⚠️ {name}, открой личный чат с ботом: {link}\nНажми *Start*, и ты автоматически зарегистрируешься."
         )
 
 @bot.message_handler(commands=["status"])
@@ -318,7 +287,6 @@ def status(msg):
     if not gs:
         bot.send_message(chat_id, "Игра ещё не создана. Используйте /register для начала.")
         return
-
     lines = ["*Участники:*"]
     for p in gs["players"].values():
         lines.append(f"- {p['name']}")
@@ -328,17 +296,11 @@ def status(msg):
 
 @bot.message_handler(commands=["quiz"])
 def quiz(msg):
-    """
-    Первый, кто вызывает /quiz в группе — становится админом.
-    Квиз стартует (состав замораживается), всем уходит ЛС с кнопкой WebApp.
-    """
     chat_id = msg.chat.id
     if msg.chat.type not in ("group", "supergroup"):
         bot.send_message(chat_id, "Команда /quiz предназначена для группового чата.")
         return
-
     gs = ensure_chat_state(chat_id)
-
     if not gs["players"]:
         bot.send_message(chat_id, "Сначала зарегистрируйте участников командой /register.")
         return
@@ -347,14 +309,14 @@ def quiz(msg):
         gs["admin_id"] = msg.from_user.id
         gs["locked"] = True
         gs["quiz_started"] = True
-        bot.send_message(chat_id, f"🚀 Квиз начался! Админ: *{msg.from_user.first_name}*.\nПроверьте личные сообщения от бота — там кнопка для входа в игру.")
+        bump_rev(gs)
+        bot.send_message(chat_id, f"🚀 Квиз начался! Админ: *{msg.from_user.first_name}*.\nПроверьте личные сообщения от бота — там кнопка для входа в мини-приложение.")
     else:
         if gs["admin_id"] != msg.from_user.id:
             bot.send_message(chat_id, "Админ уже назначен. Дождитесь управления от него.")
         else:
             bot.send_message(chat_id, "Вы уже админ этого квиза.")
 
-    # Рассылаем кнопки в ЛС участникам (и админу тоже)
     bot_username = bot.get_me().username
     for uid, p in gs["players"].items():
         try:
@@ -369,7 +331,6 @@ def quiz(msg):
                 pass
 
 # === API для мини-приложения ===
-
 def current_state_payload(gs, chat_id, user_id):
     role = "admin" if gs["admin_id"] == user_id else "player"
     rnd = gs["round"]
@@ -388,10 +349,10 @@ def current_state_payload(gs, chat_id, user_id):
         "timer_seconds": gs["timer_seconds"],
         "admin_id": gs["admin_id"],
         "question": None,
-        "round": None
+        "round": None,
+        "rev": gs.get("rev", 0)
     }
     if rnd:
-        # не раскрываем ответ до завершения
         q = rnd["q"].copy()
         if not rnd["finished"]:
             q.pop("answer", None)
@@ -402,7 +363,6 @@ def current_state_payload(gs, chat_id, user_id):
             "deadline": rnd["deadline"],
             "finished": rnd["finished"]
         }
-        # когда закончился — выдаём правильный ответ
         if rnd["finished"]:
             payload["question"]["answer"] = rnd["q"]["answer"]
             payload["question"]["correct_text"] = rnd["q"]["correct_text"]
@@ -415,9 +375,10 @@ def get_state_api():
         user_id = int(request.args.get("user_id"))
         gs = game_states.get(chat_id)
         if not gs:
-            return jsonify({"ok": False}), 400
+            # Мягкий ответ: игра завершена/нет игры
+            return jsonify({"ok": False, "ended": True}), 200
 
-        # если идёт раунд — проверим авто-закрытие по таймеру
+        # авто-закрытие по таймеру при запросе состояния
         if gs["round"]:
             finalize_round_if_needed(gs, chat_id)
 
@@ -428,10 +389,6 @@ def get_state_api():
 
 @app.route("/api/admin/config", methods=["POST"])
 def admin_config():
-    """
-    Устанавливает таймер перед началом (или между раундами).
-    body: {chat_id, user_id, timer_seconds}
-    """
     try:
         data = request.get_json(force=True)
         chat_id = int(data["chat_id"])
@@ -440,7 +397,8 @@ def admin_config():
         gs = game_states.get(chat_id)
         if not gs or gs["admin_id"] != user_id:
             return jsonify({"ok": False, "error": "not admin"}), 403
-        gs["timer_seconds"] = max(5, min(300, timer_seconds))  # 5..300 сек
+        gs["timer_seconds"] = max(5, min(300, timer_seconds))
+        bump_rev(gs)
         return jsonify({"ok": True, "timer_seconds": gs["timer_seconds"]})
     except Exception as e:
         print(f"❌ /api/admin/config error: {e}")
@@ -448,10 +406,6 @@ def admin_config():
 
 @app.route("/api/admin/start", methods=["POST"])
 def admin_start_round():
-    """
-    Старт нового раунда (или первого).
-    body: {chat_id, user_id}
-    """
     try:
         data = request.get_json(force=True)
         chat_id = int(data["chat_id"])
@@ -464,17 +418,15 @@ def admin_start_round():
         if not gs.get("timer_seconds"):
             return jsonify({"ok": False, "error": "timer not set"}), 400
 
-        # генерируем вопрос
         q = generate_question()
         started_at = time.time()
         deadline = started_at + gs["timer_seconds"]
         gs["round"] = {"q": q, "started_at": started_at, "deadline": deadline, "finished": False}
-        # сбрасываем ответы
         for p in gs["players"].values():
             p["answered"] = False
             p["last_answer_time"] = None
-
-        bot.send_message(chat_id, f"🕹️ Новый вопрос!\n{q['question']}\n⏳ Время: *{gs['timer_seconds']} сек*")
+        bump_rev(gs)
+        # (НЕ шлём вопрос в группу — всё во фронте)
         return jsonify({"ok": True})
     except Exception as e:
         print(f"❌ /api/admin/start error: {e}")
@@ -482,10 +434,6 @@ def admin_start_round():
 
 @app.route("/api/admin/next", methods=["POST"])
 def admin_next():
-    """
-    Явное завершение текущего раунда, затем старт следующего.
-    Если текущий ещё не закрыт — закрываем и тут же создаём новый.
-    """
     try:
         data = request.get_json(force=True)
         chat_id = int(data["chat_id"])
@@ -498,7 +446,6 @@ def admin_next():
         if gs["round"] and not gs["round"]["finished"]:
             finalize_round_if_needed(gs, chat_id)
 
-        # старт нового
         q = generate_question()
         started_at = time.time()
         deadline = started_at + (gs["timer_seconds"] or 30)
@@ -506,8 +453,8 @@ def admin_next():
         for p in gs["players"].values():
             p["answered"] = False
             p["last_answer_time"] = None
-
-        bot.send_message(chat_id, f"➡️ Следующий вопрос!\n{q['question']}\n⏳ Время: *{gs['timer_seconds']} сек*")
+        bump_rev(gs)
+        # (НЕ шлём в группу — всё во фронте)
         return jsonify({"ok": True})
     except Exception as e:
         print(f"❌ /api/admin/next error: {e}")
@@ -515,9 +462,6 @@ def admin_next():
 
 @app.route("/api/admin/end", methods=["POST"])
 def admin_end():
-    """
-    Завершение квиза. Вывод лидерборда в группу и возврат итогов во фронт.
-    """
     try:
         data = request.get_json(force=True)
         chat_id = int(data["chat_id"])
@@ -532,27 +476,20 @@ def admin_end():
 
         board = compute_leaderboard(gs)
 
-        # Красиво выводим в группу
+        # Лидерборд в группу — ОСТАВЛЯЕМ (по ТЗ)
         lines = ["🏁 *Квиз завершён!* Итоговый лидерборд:"]
         if not board:
             lines.append("— никого нет в таблице 😅")
         else:
-            # определим, были ли тай-брейки
-            # строим группы по очкам
             score_groups = {}
             for _, name, score, ttime in board:
                 score_groups.setdefault(score, []).append((name, ttime))
             for i, (uid, name, score, ttime) in enumerate(board):
                 medal = medals_for_position(i)
-                addon = ""
-                # если в группе по таким же очкам больше 1 человека — укажем время
-                if len(score_groups[score]) > 1:
-                    addon = f" — по времени: {ttime:.2f} сек"
+                addon = f" — по времени: {ttime:.2f} сек" if len(score_groups[score]) > 1 else ""
                 lines.append(f"{medal} *{name}* — {score} балл(ов){addon}")
-
         bot.send_message(chat_id, "\n".join(lines))
 
-        # Сбросим состояние игры (чтобы можно было начать новый позже)
         result_payload = {
             "ok": True,
             "leaderboard": [
@@ -561,7 +498,7 @@ def admin_end():
             ]
         }
 
-        # Оставим admin_id и игроков нетронутыми? По ТЗ — квиз завершён; начинаем с нуля вручную.
+        # Сброс состояния (после ответа фронту он увидит ended в /api/get_state)
         game_states.pop(chat_id, None)
         return jsonify(result_payload)
     except Exception as e:
@@ -570,12 +507,6 @@ def admin_end():
 
 @app.route("/api/submit", methods=["POST"])
 def submit_answer():
-    """
-    Принимаем ответ игрока.
-    body: { chat_id, user: { id }, given }
-    Время ответа — min(now, deadline) - started_at.
-    Если не успел до дедлайна — будет добавлено полное время при финализации.
-    """
     try:
         data = request.get_json(force=True)
         chat_id = int(data["chat_id"])
@@ -603,12 +534,11 @@ def submit_answer():
         if given == q["answer"]:
             gs["scores"][user_id] = gs["scores"].get(user_id, 0) + 1
 
-        # суммируем время всегда (и для правильных, и для неправильных ответов)
         player["total_time"] += elapsed
 
-        # если все ответили — финализируем
+        # если все ответили — финализируем (или финализируется по таймеру)
         finalize_round_if_needed(gs, chat_id)
-
+        bump_rev(gs)
         return jsonify({"ok": True})
     except Exception as e:
         print(f"❌ /api/submit error: {e}")
@@ -625,7 +555,7 @@ if __name__ == "__main__":
             bot.set_webhook(url=webhook_url)
             print("✅ Webhook установлен")
         else:
-            print("ℹ️ Вебхук не настроен (нет RENDER_EXTERNAL_HOSTNAME). Используйте polling/локальный запуск Flask.")
+            print("ℹ️ Вебхук не настроен (нет RENDER_EXTERNAL_HOSTNAME).")
     except Exception as e:
         print(f"❌ Ошибка вебхука: {e}")
 
