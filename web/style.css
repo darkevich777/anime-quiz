@@ -12,19 +12,11 @@ html, body {
                "Segoe UI Emoji", "Segoe UI Symbol";
 }
 
-/* Толстая «подушка» сверху: Telegram header + safe-area */
-body {
-  padding-top: calc(36px + var(--tg-viewport-safe-area-inset-top, 0px) + env(safe-area-inset-top, 0px));
-}
-
-/* Контейнер приложения — ещё немного воздуха */
-#app { margin-top: 20px; }
-
-/* Контент: увеличенный верхний отступ */
+/* Контент: учитываем safe-area, чтобы верх не «рубился» */
 #content {
   position: relative;
   z-index: 1;
-  padding: calc(48px + var(--tg-viewport-safe-area-inset-top, 0px) + env(safe-area-inset-top, 0px)) 16px 16px 16px;
+  padding: calc(16px + env(safe-area-inset-top, 0px)) 16px 16px 16px;
   max-width: 520px;
   margin: 0 auto;
   min-height: 100vh;
@@ -125,4 +117,4 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .text-gray-100, .text-gray-200 { color: rgba(255,255,255,0.92); }
 
 /* На всякий случай: первый блок чуть отступает от верхнего края */
-#content > *:first-child { margin-top: 12px; }
+#content > *:first-child { margin-top: 14px; }
