@@ -1,6 +1,6 @@
-// ===== Mini App — синхронный старт с кворумом 80%, стабильный отсчёт и прокси фонов =====
+// ===== Mini App — синхронный старт с кворумом 80%, стабильный отсчёт =====
 const tg = window.Telegram?.WebApp || {};
-try { tg.expand && tg.expand(); } catch {}
+try { tg.expand && tg.expand(); tg.ready && tg.ready(); } catch {}
 
 const params = new URLSearchParams(window.location.search);
 const chat_id = parseInt(params.get("chat_id"));
@@ -47,11 +47,6 @@ function fmtSec(s){
 function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
 function scrollTop(){ try{ window.scrollTo({top:0, behavior:"instant"}); }catch{} }
 
-// Прокси для изображений (обход проблем VPN/CDN)
-function toProxy(url){
-  return url ? `/api/img?u=${encodeURIComponent(url)}` : url;
-}
-
 // Стартовый фон
 function resetBackgroundToDefault(){
   currentBg = null;
@@ -61,7 +56,7 @@ function resetBackgroundToDefault(){
   document.body.style.setProperty('background', '#0b0220', 'important');
 }
 
-// Надёжная смена фона
+// Надёжная смена фона (без прокси)
 function setBackground(url){
   if (!url || url === currentBg) return;
   const img = new Image();
@@ -198,10 +193,9 @@ function startCountdownForQuestion(startedAt, imageUrl, countdownSec){
 
   const serverEnd = startedAt + countdownSec;
   const timeLeft = serverEnd - nowSec();
-  const proxied = toProxy(imageUrl);
 
   if (timeLeft <= 0.15){
-    if (proxied) preloadImage(proxied).then(()=> setBackground(proxied));
+    if (imageUrl) preloadImage(imageUrl).then(()=> setBackground(imageUrl));
     clearCountdown();
     apiRoundReady().then(()=> getState({soft:false})).catch(()=>{});
     return;
@@ -210,10 +204,10 @@ function startCountdownForQuestion(startedAt, imageUrl, countdownSec){
   countdownActive = true;
   countingStartedAt = startedAt;
   countdownEndTs = serverEnd;
-  nextQImageUrl = proxied || null;
+  nextQImageUrl = imageUrl || null;
   nextQImageReady = false;
 
-  preloadImage(nextQImageUrl).then(ok => { nextQImageReady = ok || !proxied; });
+  preloadImage(nextQImageUrl).then(ok => { nextQImageReady = ok || !imageUrl; });
 
   resetBackgroundToDefault();
   showCountdownScreen();
@@ -266,7 +260,7 @@ function maybeDismissCountdownByState(data){
   }
 }
 
-// --- Мини-оверлей «мягкий старт» для опоздавших ---
+// --- Мини-оверлей «мягкий старт» ---
 let startOverlayTimer = null;
 function showSoftStartOverlay(ms = 1000){
   if (document.getElementById("softStartOverlay")) return;
@@ -368,7 +362,7 @@ function renderAdmin(state){
         </div>
       </div>
     `;
-    if (q.image) setBackground(toProxy(q.image));
+    if (q.image) setBackground(q.image);
   }
 
   app.innerHTML = `
@@ -678,14 +672,14 @@ async function getState(opts={}){
       if (!data.round || data.round.finished){
         if (data.role === "admin") renderAdmin(data);
         else renderPlayer(data);
-        if (data.question?.image) setBackground(toProxy(data.question.image));
+        if (data.question?.image) setBackground(data.question.image);
       } else {
         if (!data.round.question_at){
           showWaitingOthers(data);
         } else {
           if (data.role === "admin") renderAdmin(data);
           else renderPlayer(data);
-          if (data.question?.image) setBackground(toProxy(data.question.image));
+          if (data.question?.image) setBackground(data.question.image);
         }
       }
 
