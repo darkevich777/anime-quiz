@@ -1,8 +1,11 @@
+
 import os
 import time
 import random
+import math
 import requests
-from flask import Flask, request, jsonify
+from urllib.parse import urlparse
+from flask import Flask, request, jsonify, Response
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
@@ -17,6 +20,8 @@ WEBAPP_BASE = os.getenv("WEBAPP_BASE", "https://example.com/web/")  # ваш п�
 MIN_TIMER = 5
 MAX_TIMER = 300
 DEADLINE_SLOP_SEC = 0.3  # "фора" к дедлайну
+COUNTDOWN_SEC = 3        # преролл перед началом вопроса
+GO_SYNC_DELAY_SEC = 0.2  # небольшая задержка для синхронного старта
 
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 app = Flask(__name__, static_url_path='', static_folder='web')
@@ -50,6 +55,28 @@ def telegram_webhook():
     bot.process_new_updates([update])
     return "ok", 200
 
+# === Прокси изображений (решение проблемы с VPN/CDN) ===
+ALLOWED_IMG_HOSTS = {"s4.anilist.co", "img.anili.st", "anilist.co"}
+
+@app.route("/api/img")
+def proxy_img():
+    url = request.args.get("u", "")
+    try:
+        pu = urlparse(url)
+        if pu.scheme not in ("http", "https"):
+            return "bad scheme", 400
+        host = pu.hostname or ""
+        if host not in ALLOWED_IMG_HOSTS and not host.endswith(".anilist.co"):
+            return "host not allowed", 400
+        r = requests.get(url, stream=True, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        ct = r.headers.get("Content-Type", "image/jpeg")
+        resp = Response(r.iter_content(64 * 1024), status=r.status_code, content_type=ct)
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
+    except Exception as e:
+        print(f"❌ /api/img proxy error: {e}")
+        return "error", 502
+
 # === Источник данных (AniList API) ===
 ANILIST_API = "https://graphql.anilist.co"
 
@@ -79,7 +106,6 @@ def fetch_anime_with_details():
     return random.choice(data["data"]["Page"]["media"])
 
 def pick_image(anime):
-    # приоритет: обложка extraLarge -> large -> bannerImage
     ci = anime.get("coverImage") or {}
     return ci.get("extraLarge") or ci.get("large") or anime.get("bannerImage") or None
 
@@ -160,7 +186,7 @@ game_states = {}
 #   timer_seconds: int|None,
 #   rounds_total: int,
 #   rounds_played: int,
-#   round: { q, started_at, deadline, finished } | None,
+#   round: { q, started_at, question_at, deadline, finished, countdown_sec, ready{uid:bool} } | None,
 #   rev: int
 # }
 
@@ -177,7 +203,7 @@ def ensure_chat_state(chat_id):
             "quiz_started": False,
             "locked": False,
             "timer_seconds": None,
-            "rounds_total": 10,   # по умолчанию
+            "rounds_total": 10,
             "rounds_played": 0,
             "round": None,
             "rev": 0
@@ -199,7 +225,7 @@ def send_webapp_button_to_user(user_id, chat_id):
 
 def finalize_round_if_needed(gs, chat_id):
     rnd = gs["round"]
-    if not rnd or rnd["finished"]:
+    if not rnd or rnd["finished"] or rnd.get("deadline") is None:
         return
     now = time.time()
     all_answered = all(p["answered"] for p in gs["players"].values())
@@ -208,11 +234,11 @@ def finalize_round_if_needed(gs, chat_id):
         return
 
     rnd["finished"] = True
-    dur = gs["timer_seconds"] or 0
+    qstart = rnd.get("question_at", rnd["started_at"])
     for uid, p in gs["players"].items():
         if not p["answered"]:
             p["last_answer_time"] = None
-            p["total_time"] += dur
+            p["total_time"] += max(0.0, (rnd.get("deadline") or qstart) - qstart)
     bump_rev(gs)
 
 def compute_leaderboard(gs):
@@ -360,8 +386,23 @@ def current_state_payload(gs, chat_id, user_id):
         if not rnd["finished"]:
             q.pop("answer", None)
             q.pop("correct_text", None)
+
+        ready = rnd.get("ready") or {}
+        ready_total = len(ready)
+        ready_required = max(1, math.ceil(0.8 * ready_total))
+        ready_done = sum(1 for v in ready.values() if v)
+
         payload["question"] = q
-        payload["round"] = {"started_at": rnd["started_at"], "deadline": rnd["deadline"], "finished": rnd["finished"]}
+        payload["round"] = {
+            "started_at": rnd["started_at"],
+            "question_at": rnd.get("question_at"),
+            "deadline": rnd.get("deadline"),
+            "finished": rnd["finished"],
+            "countdown_sec": rnd.get("countdown_sec", COUNTDOWN_SEC),
+            "ready_total": ready_total,
+            "ready_done": ready_done,
+            "ready_required": ready_required
+        }
         if rnd["finished"]:
             payload["question"]["answer"] = rnd["q"]["answer"]
             payload["question"]["correct_text"] = rnd["q"]["correct_text"]
@@ -375,7 +416,7 @@ def get_state_api():
         gs = game_states.get(chat_id)
         if not gs:
             return jsonify({"ok": False, "ended": True}), 200
-        if gs["round"]:
+        if gs["round"] and gs["round"].get("deadline") is not None:
             finalize_round_if_needed(gs, chat_id)
         return jsonify(current_state_payload(gs, chat_id, user_id))
     except Exception as e:
@@ -427,12 +468,19 @@ def admin_start_round():
                 val = 30
             gs["timer_seconds"] = max(MIN_TIMER, min(MAX_TIMER, val))
 
-        # старт первого раунда
+        # старт раунда в режиме ожидания подтверждений
         q = generate_question()
         started_at = time.time()
-        deadline = started_at + gs["timer_seconds"]
-        gs["round"] = {"q": q, "started_at": started_at, "deadline": deadline, "finished": False}
-        gs["rounds_played"] = 1  # первый раунд начался
+        gs["round"] = {
+            "q": q,
+            "started_at": started_at,
+            "question_at": None,
+            "deadline": None,
+            "finished": False,
+            "countdown_sec": COUNTDOWN_SEC,
+            "ready": {str(uid): False for uid in gs["players"].keys()},
+        }
+        gs["rounds_played"] = 1
         for p in gs["players"].values():
             p["answered"] = False
             p["last_answer_time"] = None
@@ -452,10 +500,10 @@ def admin_next():
         if not gs or gs["admin_id"] != user_id:
             return jsonify({"ok": False, "error": "not admin"}), 403
 
-        if gs["round"] and not gs["round"]["finished"]:
+        if gs["round"] and not gs["round"]["finished"] and gs["round"].get("deadline") is not None:
             finalize_round_if_needed(gs, chat_id)
 
-        # Проверка лимита — если уже сыграли нужное количество, завершаем квиз
+        # Проверка лимита раундов
         played = gs.get("rounds_played", 0)
         total = gs.get("rounds_total", 10)
         if played >= total:
@@ -489,11 +537,18 @@ def admin_next():
             game_states.pop(chat_id, None)
             return jsonify({"ok": True, "ended": True, "leaderboard": rematch_states[chat_id]["leaderboard"]})
 
-        # Иначе запускаем следующий раунд
+        # Новый раунд в ожидании подтверждений
         q = generate_question()
         started_at = time.time()
-        deadline = started_at + (gs["timer_seconds"] or 30)
-        gs["round"] = {"q": q, "started_at": started_at, "deadline": deadline, "finished": False}
+        gs["round"] = {
+            "q": q,
+            "started_at": started_at,
+            "question_at": None,
+            "deadline": None,
+            "finished": False,
+            "countdown_sec": COUNTDOWN_SEC,
+            "ready": {str(uid): False for uid in gs["players"].keys()},
+        }
         gs["rounds_played"] = played + 1
         for p in gs["players"].values():
             p["answered"] = False
@@ -514,12 +569,10 @@ def admin_end():
         if not gs or gs["admin_id"] != user_id:
             return jsonify({"ok": False, "error": "not admin"}), 403
 
-        if gs["round"] and not gs["round"]["finished"]:
+        if gs["round"] and not gs["round"]["finished"] and gs["round"].get("deadline") is not None:
             finalize_round_if_needed(gs, chat_id)
 
         board = compute_leaderboard(gs)
-
-        # Отправка итогов в группу
         lines = ["🏁 *Квиз завершён!* Итоговый лидерборд:"]
         if not board:
             lines.append("— никого нет в таблице 😅")
@@ -531,12 +584,14 @@ def admin_end():
                 medal = medals_for_position(i)
                 addon = f" — по времени: {ttime:.2f} сек" if len(score_groups[score]) > 1 else ""
                 lines.append(f"{medal} *{name}* — {score} балл(ов){addon}")
-        bot.send_message(chat_id, "\n".join(lines))
+        try:
+            bot.send_message(chat_id, "\n".join(lines))
+        except Exception:
+            pass
 
-        # Создаём состояние рематча
         rematch_states[chat_id] = {
             "admin_id": gs["admin_id"],
-            "confirmed": {},  # uid: name
+            "confirmed": {},
             "leaderboard": [
                 {"user_id": uid, "name": name, "score": score, "total_time": ttime}
                 for uid, name, score, ttime in board
@@ -544,7 +599,6 @@ def admin_end():
             "created_at": time.time()
         }
 
-        # Сбрасываем текущую игру
         game_states.pop(chat_id, None)
         return jsonify({"ok": True, "leaderboard": rematch_states[chat_id]["leaderboard"]})
     except Exception as e:
@@ -564,12 +618,15 @@ def submit_answer():
         rnd = gs["round"]
         if rnd["finished"]:
             return jsonify({"ok": False, "error": "round finished"}), 400
+        if rnd.get("question_at") is None or time.time() < rnd["question_at"] - 0.05:
+            return jsonify({"ok": False, "error": "not started"}), 400
         player = gs["players"].get(user_id)
         if not player or player["answered"]:
             return jsonify({"ok": False}), 400
 
         now = time.time()
-        elapsed = max(0.0, min(now, rnd["deadline"]) - rnd["started_at"])
+        qstart = rnd.get("question_at", rnd["started_at"])
+        elapsed = max(0.0, min(now, rnd["deadline"]) - qstart)
         player["last_answer_time"] = elapsed
         player["answered"] = True
 
@@ -583,6 +640,71 @@ def submit_answer():
         return jsonify({"ok": True})
     except Exception as e:
         print(f"❌ /api/submit error: {e}")
+        return jsonify({"ok": False}), 500
+
+# === API синхронизации старта ===
+@app.route("/api/round/ready", methods=["POST"])
+def round_ready():
+    try:
+        data = request.get_json(force=True)
+        chat_id = int(data["chat_id"])
+        user_id = int(data["user_id"])
+        gs = game_states.get(chat_id)
+        if not gs or not gs.get("round"):
+            return jsonify({"ok": False}), 400
+        rnd = gs["round"]
+        if rnd["finished"]:
+            return jsonify({"ok": False, "error": "round finished"}), 400
+
+        ready = rnd.setdefault("ready", {})
+        key = str(user_id)
+        if key not in ready:
+            return jsonify({"ok": False, "error": "not in players"}), 403
+
+        if not ready[key]:
+            ready[key] = True
+            bump_rev(gs)
+
+        ready_total = len(ready)
+        ready_done = sum(1 for v in ready.values() if v)
+        ready_required = max(1, math.ceil(0.8 * ready_total))
+
+        if ready_done >= ready_required and rnd.get("question_at") is None:
+            go_at = time.time() + GO_SYNC_DELAY_SEC
+            rnd["question_at"] = go_at
+            rnd["deadline"] = go_at + (gs["timer_seconds"] or 30)
+            bump_rev(gs)
+
+        return jsonify({
+            "ok": True,
+            "ready_done": ready_done,
+            "ready_total": ready_total,
+            "ready_required": ready_required,
+            "question_at": rnd.get("question_at"),
+            "deadline": rnd.get("deadline")
+        })
+    except Exception as e:
+        print(f"❌ /api/round/ready error: {e}")
+        return jsonify({"ok": False}), 500
+
+@app.route("/api/admin/force_start", methods=["POST"])
+def admin_force_start():
+    try:
+        data = request.get_json(force=True)
+        chat_id = int(data["chat_id"])
+        user_id = int(data["user_id"])
+        gs = game_states.get(chat_id)
+        if not gs or gs["admin_id"] != user_id or not gs.get("round"):
+            return jsonify({"ok": False, "error": "not admin"}), 403
+        rnd = gs["round"]
+        if rnd.get("question_at") is None:
+            go_at = time.time() + GO_SYNC_DELAY_SEC
+            rnd["question_at"] = go_at
+            rnd["deadline"] = go_at + (gs["timer_seconds"] or 30)
+            bump_rev(gs)
+        return jsonify({"ok": True})
+    except Exception as e:
+        print(f"❌ /api/admin/force_start error: {e}")
         return jsonify({"ok": False}), 500
 
 # === API рематча ===
@@ -659,17 +781,15 @@ def rematch_start():
         gs["quiz_started"] = True
         gs["locked"] = True
         gs["timer_seconds"] = None
-        gs["rounds_total"] = gs.get("rounds_total", 10)  # останется прежним, если нужно — админ поменяет в веб-аппе
+        gs["rounds_total"] = gs.get("rounds_total", 10)
         gs["rounds_played"] = 0
         gs["round"] = None
         bump_rev(gs)
 
-        # Рассылка кнопок в ЛС подтвердившим
         for uid in gs["players"].keys():
             try: send_webapp_button_to_user(uid, chat_id)
             except Exception: pass
 
-        # Удаляем состояние рематча
         rematch_states.pop(chat_id, None)
         return jsonify({"ok": True})
     except Exception as e:
