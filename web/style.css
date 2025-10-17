@@ -12,19 +12,19 @@ html, body {
                "Segoe UI Emoji", "Segoe UI Symbol";
 }
 
-/* учитываем safe-area для всей страницы, чтобы шапку не резало */
+/* Толстая «подушка» сверху: Telegram header + safe-area */
 body {
-  padding-top: calc(12px + var(--tg-viewport-safe-area-inset-top, 0px) + env(safe-area-inset-top, 0px));
+  padding-top: calc(36px + var(--tg-viewport-safe-area-inset-top, 0px) + env(safe-area-inset-top, 0px));
 }
 
-/* Контейнер приложения — небольшой отступ сверху */
-#app { margin-top: 12px; }
+/* Контейнер приложения — ещё немного воздуха */
+#app { margin-top: 20px; }
 
-/* Контент: учитываем safe-area, чтобы верх не «рубился» */
+/* Контент: увеличенный верхний отступ */
 #content {
   position: relative;
   z-index: 1;
-  padding: calc(20px + var(--tg-viewport-safe-area-inset-top, 0px) + env(safe-area-inset-top, 0px)) 16px 16px 16px;
+  padding: calc(48px + var(--tg-viewport-safe-area-inset-top, 0px) + env(safe-area-inset-top, 0px)) 16px 16px 16px;
   max-width: 520px;
   margin: 0 auto;
   min-height: 100vh;
