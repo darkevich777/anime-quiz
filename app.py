@@ -13,23 +13,17 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
 
-# Публичная база для веба (нормализуем, чтобы всегда было ".../web/")
+# Сборка корректного WEBAPP_BASE
 _public_host = os.getenv("PUBLIC_BASE") or os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if _public_host and not _public_host.startswith("http"):
     _public_host = f"https://{_public_host}"
 
 WEBAPP_BASE = os.getenv("WEBAPP_BASE")
 if not WEBAPP_BASE:
-    if _public_host:
-        WEBAPP_BASE = f"{_public_host.rstrip('/')}/web/"
-    else:
-        # локальная разработка — тот же хост
-        WEBAPP_BASE = "/web/"
+    # если не задано — пробуем из публичного хоста, иначе используем относительный путь
+    WEBAPP_BASE = f"{_public_host.rstrip('/')}/web/" if _public_host else "/web/"
 # гарантируем закрывающий слэш
-WEBAPP_BASE = WEBAPP_BASE.rstrip("/") + "/"
-
-# Вебхук — приоритет у WEBHOOK_URL, иначе строим из RENDER_EXTERNAL_HOSTNAME и роута с TOKEN
-EXPLICIT_WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBAPP_BASE = WEBAPP_BASE.rstrip('/') + '/'
 
 # Константы
 MIN_TIMER = 5
@@ -46,6 +40,10 @@ app = Flask(__name__, static_url_path='', static_folder='web')
 def index():
     return "✅ Bot is running!", 200
 
+@app.route('/api/_ping')
+def ping():
+    return jsonify({"ok": True, "ts": time.time()})
+
 @app.route('/web/<path:path>')
 def serve_web(path):
     return app.send_static_file(path)
@@ -54,24 +52,16 @@ def serve_web(path):
 def serve_web_index():
     return app.send_static_file('index.html')
 
-# Быстрый пинг для диагностики
-@app.route("/api/_ping")
-def ping():
-    return jsonify({"ok": True, "ts": time.time()})
+# Вебхук (опционально: либо /{TOKEN}, либо /webhook)
+@app.route('/webhook', methods=['POST'])
+@app.route('/webhook/', methods=['POST'])
+def webhook_handler_webhook():
+    update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
+    bot.process_new_updates([update])
+    return "ok", 200
 
-# Вебхук (универсальный)
-@app.route('/webhook/', methods=['POST', 'GET'])
-def webhook_handler():
-    if request.method == 'POST':
-        update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
-        bot.process_new_updates([update])
-        return "ok", 200
-    else:
-        return "Webhook endpoint", 200
-
-# Вебхук на /{TOKEN} (на случай альтернативной конфигурации)
 @app.route(f"/{TOKEN}", methods=["POST"])
-def telegram_webhook():
+def telegram_webhook_token():
     update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
     bot.process_new_updates([update])
     return "ok", 200
@@ -224,6 +214,7 @@ def deep_link(bot_username, chat_id):
 
 def send_webapp_button_to_user(user_id, chat_id):
     base = WEBAPP_BASE.rstrip('/') + '/'
+    # если WEBAPP_BASE относительный, всё равно ок: Telegram откроет относительный URL внутри того же хоста
     url = f"{base}?chat_id={chat_id}&user_id={user_id}"
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton(text="🎮 Открыть квиз", web_app=WebAppInfo(url=url)))
@@ -509,7 +500,6 @@ def admin_next():
         if gs["round"] and not gs["round"]["finished"] and gs["round"].get("deadline") is not None:
             finalize_round_if_needed(gs, chat_id)
 
-        # Проверка лимита раундов
         played = gs.get("rounds_played", 0)
         total = gs.get("rounds_total", 10)
         if played >= total:
@@ -543,7 +533,6 @@ def admin_next():
             game_states.pop(chat_id, None)
             return jsonify({"ok": True, "ended": True, "leaderboard": rematch_states[chat_id]["leaderboard"]})
 
-        # Новый раунд в ожидании подтверждений
         q = generate_question()
         started_at = time.time()
         gs["round"] = {
@@ -775,7 +764,6 @@ def rematch_start():
             return jsonify({"ok": False, "error": "not admin"}), 403
         confirmed = rs["confirmed"]
 
-        # Создаём новую игру только с подтвердившими
         gs = ensure_chat_state(chat_id)
         gs["players"].clear()
         gs["scores"].clear()
@@ -807,19 +795,18 @@ if __name__ == "__main__":
     try:
         bot.remove_webhook()
         time.sleep(1)
-
-        if EXPLICIT_WEBHOOK_URL:
-            webhook_url = EXPLICIT_WEBHOOK_URL
-        else:
+        webhook_url = os.getenv('WEBHOOK_URL')
+        if not webhook_url:
+            # запасной вариант для Render по пути /{TOKEN}
             host = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-            webhook_url = f"https://{host}/{TOKEN}" if host else None
-
+            if host:
+                webhook_url = f"https://{host}/{TOKEN}"
         if webhook_url:
             print(f"🔄 Устанавливаю вебхук: {webhook_url}")
             bot.set_webhook(url=webhook_url)
             print("✅ Webhook установлен")
         else:
-            print("ℹ️ Вебхук не настроен.")
+            print("ℹ️ Вебхук не настроен: нет WEBHOOK_URL и RENDER_EXTERNAL_HOSTNAME.")
     except Exception as e:
         print(f"❌ Ошибка вебхука: {e}")
 
