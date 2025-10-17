@@ -1,4 +1,5 @@
-// ===== Mini App — стабильный отсчёт 3..2..1, плюс выбор раундов и улучшения рематча =====
+
+// ===== Mini App — синхронный старт с кворумом 80%, стабильный отсчёт и прокси фонов =====
 const tg = window.Telegram.WebApp;
 tg.expand();
 
@@ -12,9 +13,7 @@ const app = document.getElementById("content");
 const POLL_INTERVAL_MS = 3000;
 const DEADLINE_SLOP_MS = 300;
 const LOCAL_TIMER_MS = 250;
-const COUNTDOWN_SEC = 3;
-const COUNTDOWN_SKIP_THRESHOLD = 0.2;
-const PRELOAD_WAIT_CAP_MS = 800;
+const PRELOAD_WAIT_CAP_MS = 1200;
 const OPTIONS_MIN_HEIGHT_PX = 260;
 
 let lastState = null;
@@ -27,7 +26,7 @@ let localTimer = null;
 let rematchTimer = null;
 
 let chosenTimer = 30;
-let chosenRounds = 10;                 // <- по умолчанию 10 раундов
+let chosenRounds = 10;
 let currentBg = null;
 
 // --- состояние отсчёта/предзагрузки ---
@@ -48,6 +47,11 @@ function fmtSec(s){
 }
 function renderLoading(msg="Загрузка..."){ app.innerHTML = `<p class="text-lg">${msg}</p>`; }
 function scrollTop(){ try{ window.scrollTo({top:0, behavior:"instant"}); }catch{} }
+
+// Прокси для изображений (обход проблем VPN/CDN)
+function toProxy(url){
+  return url ? `/api/img?u=${encodeURIComponent(url)}` : url;
+}
 
 // Стартовый фон
 function resetBackgroundToDefault(){
@@ -105,7 +109,7 @@ function startLocalTimer(deadline, total){
     const rem = document.getElementById("timerRemain");
     if (bar){
       const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
-      bar.style.width = `${pct}%`;
+      bar.style.width = `${pct}%`
     }
     if (rem) rem.textContent = `Осталось: ${fmtSec(remain)}`;
     if (remain <= 0) stopLocalTimer();
@@ -119,15 +123,19 @@ async function apiGetState(signal){
   return res.json();
 }
 async function postJSON(url, body){
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify(body)
-  });
+  const res = await fetch(url, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
   return res.json();
 }
 async function apiRematchState(){
   const res = await fetch(`/api/rematch/state?chat_id=${chat_id}&user_id=${user_id}`);
+  return res.json();
+}
+async function apiRoundReady(){
+  const res = await fetch(`/api/round/ready`, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ chat_id, user_id })
+  });
   return res.json();
 }
 
@@ -177,28 +185,32 @@ function clearCountdown(){
   countdownRaf = null;
   if (countdownHardTimeout) clearTimeout(countdownHardTimeout);
   countdownHardTimeout = null;
+  if (startOverlayTimer){ clearTimeout(startOverlayTimer); startOverlayTimer = null; }
+  const ov = document.getElementById("softStartOverlay");
+  if (ov) ov.remove();
 }
-function startCountdownForQuestion(startedAt, imageUrl){
+
+function startCountdownForQuestion(startedAt, imageUrl, countdownSec){
   if (countdownActive && countingStartedAt === startedAt) return;
 
-  const serverEnd = startedAt + COUNTDOWN_SEC;
+  const serverEnd = startedAt + countdownSec;
   const timeLeft = serverEnd - nowSec();
+  const proxied = toProxy(imageUrl);
 
-  // поздно пришли — пропускаем отсчёт
-  if (timeLeft <= COUNTDOWN_SKIP_THRESHOLD){
-    if (imageUrl) preloadImage(imageUrl).then(()=> setBackground(imageUrl));
+  if (timeLeft <= 0.15){
+    if (proxied) preloadImage(proxied).then(()=> setBackground(proxied));
     clearCountdown();
-    setTimeout(()=>getState({soft:false}), 0);
+    apiRoundReady().then(()=> getState({soft:false}));
     return;
   }
 
   countdownActive = true;
   countingStartedAt = startedAt;
   countdownEndTs = serverEnd;
-  nextQImageUrl = imageUrl || null;
+  nextQImageUrl = proxied || null;
   nextQImageReady = false;
 
-  preloadImage(nextQImageUrl).then(ok => { nextQImageReady = ok || !imageUrl; });
+  preloadImage(nextQImageUrl).then(ok => { nextQImageReady = ok || !proxied; });
 
   resetBackgroundToDefault();
   showCountdownScreen();
@@ -209,37 +221,40 @@ function startCountdownForQuestion(startedAt, imageUrl){
     const el = document.getElementById("cdVal");
     if (el) el.textContent = String(Math.max(0, left));
     if (left <= 0){
-      finishCountdownAndShowQuestion();
+      finishCountdownAndSignalReady();
     } else {
       countdownRaf = requestAnimationFrame(tick);
     }
   };
   countdownRaf = requestAnimationFrame(tick);
 
+  if (countdownHardTimeout) clearTimeout(countdownHardTimeout);
   countdownHardTimeout = setTimeout(()=>{
-    if (countdownActive && countingStartedAt === startedAt) finishCountdownAndShowQuestion();
-  }, COUNTDOWN_SEC*1000 + PRELOAD_WAIT_CAP_MS + 300);
+    if (countdownActive && countingStartedAt === startedAt) finishCountdownAndSignalReady();
+  }, countdownSec*1000 + PRELOAD_WAIT_CAP_MS + 400);
 }
-function finishCountdownAndShowQuestion(){
+
+function finishCountdownAndSignalReady(){
   const waitUntil = Date.now() + PRELOAD_WAIT_CAP_MS;
   const waitLoop = ()=>{
     if (!countdownActive) return;
     if (nextQImageReady || Date.now() > waitUntil){
       if (nextQImageUrl) setBackground(nextQImageUrl);
+      apiRoundReady().then(()=> getState({soft:false}));
       clearCountdown();
-      getState({soft:false});
     } else {
-      setTimeout(waitLoop, 50);
+      setTimeout(waitLoop, 60);
     }
   };
   waitLoop();
 }
+
 function maybeDismissCountdownByState(data){
   if (!countdownActive) return;
-  const sameRound = data.round && data.round.started_at === countingStartedAt;
-  const roundOngoing = data.round && !data.round.finished && (data.round.deadline - nowSec() > 0);
-  const timeLeft = countdownEndTs - nowSec();
-  if (sameRound && (timeLeft <= 0.05 || roundOngoing)){
+  const qAt = data.round?.question_at;
+  if (!qAt) return;
+  const now = nowSec();
+  if (now >= qAt){
     if (nextQImageUrl){
       if (nextQImageReady) setBackground(nextQImageUrl);
       else setTimeout(()=>setBackground(nextQImageUrl), 0);
@@ -248,20 +263,52 @@ function maybeDismissCountdownByState(data){
   }
 }
 
+// --- Мини-оверлей «мягкий старт» для опоздавших ---
+let startOverlayTimer = null;
+function showSoftStartOverlay(ms = 1000){
+  if (document.getElementById("softStartOverlay")) return;
+  const ov = document.createElement("div");
+  ov.id = "softStartOverlay";
+  ov.style.position = "fixed";
+  ov.style.inset = "0";
+  ov.style.zIndex = "9999";
+  ov.style.display = "flex";
+  ov.style.alignItems = "center";
+  ov.style.justifyContent = "center";
+  ov.style.pointerEvents = "none";
+  ov.style.background = "rgba(0,0,0,0.18)";
+  ov.innerHTML = `<div style="font-size:64px;font-weight:700;opacity:.96;transform:translateY(-6px)"><span id="softStartNum">1</span></div>`;
+  document.body.appendChild(ov);
+  const num = document.getElementById("softStartNum");
+  let left = Math.max(200, Math.min(1000, ms));
+  const tick = ()=>{
+    left -= 120;
+    if (left < 420 && num && num.textContent !== "0") num.textContent = "0";
+    if (left <= 0){
+      ov.style.transition = "opacity .2s ease";
+      ov.style.opacity = "0";
+      startOverlayTimer = setTimeout(()=>{ ov.remove(); startOverlayTimer = null; }, 220);
+    } else {
+      startOverlayTimer = setTimeout(tick, 120);
+    }
+  };
+  startOverlayTimer = setTimeout(tick, 120);
+}
+
 // ---------- Рендеры ----------
 function renderAdmin(state){
   const rnd = state.round, q = state.question;
   const playersCount = Object.keys(state.players||{}).length;
   const firstScreen = !state.round;
 
-  // --- Блок настроек до старта: таймер + количество раундов ---
   const settingsBlock = firstScreen ? `
     <div class="p-3 bg-purple-900/40 rounded-lg space-y-2 border border-white/10">
       <div class="text-sm text-gray-100">Таймер вопроса (сек):</div>
       <div class="grid grid-cols-4 gap-2">
-        ${[15,30,45,60].map(s=>`
-          <button class="timer btn py-2 rounded-lg ${state.timer_seconds===s?'bg-purple-600':''}" data-s="${s}">${s}</button>
-        `).join("")}
+        ${[15,30,45,60].map(s=>{
+          const selected = (state.timer_seconds ?? chosenTimer) === s;
+          return \`<button class="timer btn py-2 rounded-lg \${selected ? 'bg-purple-600':''}" data-s="\${s}">\${s}</button>\`;
+        }).join("")}
       </div>
       <div class="text-sm text-gray-100 mt-3">Количество раундов:</div>
       <div class="grid grid-cols-4 gap-2">
@@ -278,6 +325,7 @@ function renderAdmin(state){
       <div class="grid ${firstScreen ? 'grid-cols-1' : 'grid-cols-2'} gap-2">
         ${firstScreen ? buttonPrimary("startRound","▶ Начать квиз") : ""}
         ${buttonGhost("nextRound","⏭ Следующий вопрос", !state.round || !state.round.finished)}
+        ${buttonGhost("forceStart","⚡ Форс-старт", !state.round || !!state.round.question_at || state.round.finished)}
         ${buttonGhost("endQuiz","🛑 Завершить квиз")}
       </div>
       <div class="text-xs text-gray-100">Админ тоже может отвечать.</div>
@@ -311,13 +359,13 @@ function renderAdmin(state){
       <div class="mt-4 p-3 bg-purple-800/30 rounded-lg border border-white/10">
         <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
         <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
-        ${rnd ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
+        ${rnd && rnd.deadline ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
         <div class="text-sm text-gray-100 mt-2">
           Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
         </div>
       </div>
     `;
-    if (q.image) setBackground(q.image);
+    if (q.image) setBackground(toProxy(q.image));
   }
 
   app.innerHTML = `
@@ -328,7 +376,6 @@ function renderAdmin(state){
   `;
   scrollTop();
 
-  // ----- handlers -----
   document.querySelectorAll(".timer").forEach(b=>{
     b.onclick = ()=>{
       chosenTimer = parseInt(b.dataset.s);
@@ -347,11 +394,7 @@ function renderAdmin(state){
   const saveSettingsBtn = document.getElementById("saveSettings");
   if (saveSettingsBtn) saveSettingsBtn.onclick = async ()=>{
     saveSettingsBtn.disabled = true;
-    const r = await postJSON("/api/admin/config", {
-      chat_id, user_id,
-      timer_seconds: chosenTimer,
-      rounds_total: chosenRounds
-    }).catch(()=>({ok:false}));
+    const r = await postJSON("/api/admin/config", { chat_id, user_id, timer_seconds: chosenTimer, rounds_total: chosenRounds }).catch(()=>({ok:false}));
     saveSettingsBtn.disabled = false;
     if (r.ok) getState({soft:false});
   };
@@ -360,16 +403,9 @@ function renderAdmin(state){
   if (startBtn) startBtn.onclick = async ()=>{
     startBtn.disabled = true;
     try{
-      const c = await postJSON("/api/admin/config", {
-        chat_id, user_id,
-        timer_seconds: chosenTimer,
-        rounds_total: chosenRounds
-      });
+      const c = await postJSON("/api/admin/config", { chat_id, user_id, timer_seconds: chosenTimer, rounds_total: chosenRounds });
       if (!c.ok) { startBtn.disabled=false; return; }
-      const r = await postJSON("/api/admin/start", {
-        chat_id, user_id,
-        timer_seconds: chosenTimer   // на всякий случай дублируем
-      });
+      const r = await postJSON("/api/admin/start", { chat_id, user_id, timer_seconds: chosenTimer });
       if (r.ok) getState({soft:false});
     } finally { startBtn.disabled = false; }
   };
@@ -384,9 +420,18 @@ function renderAdmin(state){
     } finally { nextBtn.disabled = false; }
   };
 
+  const fsBtn = document.getElementById("forceStart");
+  if (fsBtn) fsBtn.onclick = async ()=>{
+    if (fsBtn.disabled) return;
+    fsBtn.disabled = true;
+    try{
+      const r = await postJSON("/api/admin/force_start", {chat_id, user_id});
+      if (r.ok) getState({soft:false});
+    } finally { fsBtn.disabled = false; }
+  };
+
   const endBtn = document.getElementById("endQuiz");
   if (endBtn) endBtn.onclick = async ()=>{
-    // 5) без доп. подтверждения
     endBtn.disabled = true;
     try{
       const r = await postJSON("/api/admin/end", {chat_id, user_id});
@@ -402,7 +447,7 @@ function renderAdmin(state){
     b.onclick = (e)=> submitAnswer(e);
   });
 
-  if (state.round && !state.round.finished){
+  if (state.round && state.round.deadline && !state.round.finished){
     startLocalTimer(state.round.deadline, state.timer_seconds || 1);
   } else {
     stopLocalTimer();
@@ -443,7 +488,7 @@ function renderPlayer(state){
     <div class="mt-4 p-3 bg-purple-800/30 rounded-lg border border-white/10">
       <h2 class="text-lg mb-3 font-semibold">${q.question}</h2>
       <div id="optionsBox" class="grid grid-cols-1 gap-3 mb-4" style="min-height:${OPTIONS_MIN_HEIGHT_PX}px">${optsHtml}</div>
-      ${rnd ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
+      ${rnd && rnd.deadline ? `<div class="mt-2">${progressBar(remain, total)}</div>` : ""}
       <div class="text-sm text-gray-100 mt-2">
         Ответили: ${Object.values(state.players||{}).filter(p=>p.answered).length}/${playersCount}
       </div>
@@ -455,7 +500,7 @@ function renderPlayer(state){
     b.onclick = (e)=> submitAnswer(e);
   });
 
-  if (state.round && !state.round.finished){
+  if (state.round && state.round.deadline && !state.round.finished){
     startLocalTimer(state.round.deadline, state.timer_seconds || 1);
   } else {
     stopLocalTimer();
@@ -476,10 +521,8 @@ function renderFinalBoard(board){
     </div>
   `).join("");
 
-  // 2) Тоггл участия: участвовать ↔ отменить участие
   const joinToggleBtn = `<button id="rematchToggle" class="w-full py-3 bg-purple-600 rounded-lg hover:bg-purple-700 transition">🔁 Участвовать ещё раз</button>`;
 
-  // 4) "Перезапустить" неактивна до 1 подтверждённого
   const adminPanel = `
     <div id="rematchAdmin" class="mt-4 p-3 bg-purple-900/30 rounded-lg border border-white/10 hidden">
       <div class="text-sm mb-2">Подтвердили участие:</div>
@@ -497,7 +540,6 @@ function renderFinalBoard(board){
 
   document.getElementById("rematchToggle").onclick = async ()=>{
     try{
-      // узнаём текущее состояние, чтобы понять — мы в списке или нет
       const s = await apiRematchState();
       const inList = s.ok && s.confirmed && s.confirmed[String(user_id)];
       if (inList){
@@ -519,17 +561,14 @@ async function updateRematchAdminUI(forceShow=false){
   if (!box) return;
   if (!data.ok){ box.classList.add("hidden"); return; }
 
-  // показывать админ-панель только админу
   if (forceShow || data.admin_id === user_id) box.classList.remove("hidden"); else box.classList.add("hidden");
 
-  // список подтверждений
   const list = document.getElementById("rematchList");
   const items = Object.values(data.confirmed || {});
   if (list){
     list.innerHTML = items.length ? items.map(n=>`<div>• ${n}</div>`).join("") : "<div>— пока никто</div>";
   }
 
-  // 4) активируем старт только при >=1
   const startBtn = document.getElementById("rematchStart");
   if (startBtn){
     startBtn.disabled = !(items.length >= 1);
@@ -544,7 +583,6 @@ async function updateRematchAdminUI(forceShow=false){
     };
   }
 
-  // 2) текст кнопки для своего статуса
   const toggle = document.getElementById("rematchToggle");
   if (toggle){
     const inList = data.confirmed && data.confirmed[String(user_id)];
@@ -580,39 +618,63 @@ async function getState(opts={}){
     }
     if (!data.ok){ renderLoading("Игра не найдена."); return; }
 
-    // если видим, что раунд уже идёт — снимем отсчёт
     maybeDismissCountdownByState(data);
 
-    // детект нового вопроса
     const startedAt = data.round?.started_at;
     const newQuestion = startedAt && (!lastState?.round || startedAt !== lastState.round.started_at);
 
     if (newQuestion){
       const imgUrl = data.question?.image || null;
-      startCountdownForQuestion(startedAt, imgUrl);
+      const cd = data.round?.countdown_sec || 3;
+      startCountdownForQuestion(startedAt, imgUrl, cd);
     }
 
-    // обновляем локальное состояние/таймеры
+    const wasWaiting = !!(lastState?.round && !lastState.round.question_at && !lastState.round.finished);
+    const nowWaiting  = !!(data.round && !data.round.question_at && !data.round.finished);
+    const justSwitchedToQuestion = wasWaiting && !nowWaiting && !!data.round?.question_at;
+
     if (data.rev !== lastRev || !opts.soft || newQuestion){
       lastRev = data.rev;
       lastState = data;
 
-      // подхватываем текущие настройки (если пришли из бекэнда)
       if (data.timer_seconds) chosenTimer = data.timer_seconds;
       if (data.rounds_total) chosenRounds = data.rounds_total;
 
-      if (data.round && !data.round.finished) startPolling(POLL_INTERVAL_MS);
-      else stopPolling();
+      if (data.round && data.round.deadline && !data.round.finished) startPolling(POLL_INTERVAL_MS);
+      else startPolling(1000);
 
-      if (data.round && !data.round.finished) setDeadlineTimer(data.round.deadline);
+      if (data.round && data.round.deadline && !data.round.finished) setDeadlineTimer(data.round.deadline);
       else if (deadlineTimer){ clearTimeout(deadlineTimer); deadlineTimer=null; }
 
-      if (countdownActive){
-        showCountdownScreen();
-      } else {
+      if (!data.round || data.round.finished){
         if (data.role === "admin") renderAdmin(data);
         else renderPlayer(data);
-        if (data.question?.image) setBackground(data.question.image);
+        if (data.question?.image) setBackground(toProxy(data.question.image));
+      } else {
+        if (!data.round.question_at){
+          showWaitingOthers(data);
+        } else {
+          if (data.role === "admin") renderAdmin(data);
+          else renderPlayer(data);
+          if (data.question?.image) setBackground(toProxy(data.question.image));
+        }
+      }
+
+      if (justSwitchedToQuestion){
+        const now = nowSec();
+        const qAt = data.round.question_at || now;
+        const latenessMs = Math.max(0, (now - qAt) * 1000);
+        const dur = latenessMs < 200 ? 900 : (latenessMs < 1200 ? 600 : 450);
+        showSoftStartOverlay(dur);
+      }
+
+      if (!lastState && data.round && data.round.question_at && !data.round.finished){
+        const now = nowSec();
+        const qAt = data.round.question_at;
+        const latenessMs = Math.max(0, (now - qAt) * 1000);
+        if (latenessMs > 200) {
+          showSoftStartOverlay(latenessMs > 4000 ? 350 : 550);
+        }
       }
     }
   }finally{
