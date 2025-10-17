@@ -1,7 +1,6 @@
-
 // ===== Mini App — синхронный старт с кворумом 80%, стабильный отсчёт и прокси фонов =====
-const tg = window.Telegram.WebApp;
-tg.expand();
+const tg = window.Telegram?.WebApp || {};
+try { tg.expand && tg.expand(); } catch {}
 
 const params = new URLSearchParams(window.location.search);
 const chat_id = parseInt(params.get("chat_id"));
@@ -109,7 +108,7 @@ function startLocalTimer(deadline, total){
     const rem = document.getElementById("timerRemain");
     if (bar){
       const pct = Math.max(0, Math.min(100, Math.round(100*(total-remain)/Math.max(1,total))));
-      bar.style.width = `${pct}%`
+      bar.style.width = `${pct}%`;
     }
     if (rem) rem.textContent = `Осталось: ${fmtSec(remain)}`;
     if (remain <= 0) stopLocalTimer();
@@ -120,14 +119,17 @@ function stopLocalTimer(){ if (localTimer){ clearInterval(localTimer); localTime
 // ---------- API ----------
 async function apiGetState(signal){
   const res = await fetch(`/api/get_state?chat_id=${chat_id}&user_id=${user_id}`, { signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 async function postJSON(url, body){
   const res = await fetch(url, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 async function apiRematchState(){
   const res = await fetch(`/api/rematch/state?chat_id=${chat_id}&user_id=${user_id}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 async function apiRoundReady(){
@@ -136,6 +138,7 @@ async function apiRoundReady(){
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify({ chat_id, user_id })
   });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
@@ -200,7 +203,7 @@ function startCountdownForQuestion(startedAt, imageUrl, countdownSec){
   if (timeLeft <= 0.15){
     if (proxied) preloadImage(proxied).then(()=> setBackground(proxied));
     clearCountdown();
-    apiRoundReady().then(()=> getState({soft:false}));
+    apiRoundReady().then(()=> getState({soft:false})).catch(()=>{});
     return;
   }
 
@@ -240,7 +243,7 @@ function finishCountdownAndSignalReady(){
     if (!countdownActive) return;
     if (nextQImageReady || Date.now() > waitUntil){
       if (nextQImageUrl) setBackground(nextQImageUrl);
-      apiRoundReady().then(()=> getState({soft:false}));
+      apiRoundReady().then(()=> getState({soft:false})).catch(()=>{});
       clearCountdown();
     } else {
       setTimeout(waitLoop, 60);
@@ -394,9 +397,12 @@ function renderAdmin(state){
   const saveSettingsBtn = document.getElementById("saveSettings");
   if (saveSettingsBtn) saveSettingsBtn.onclick = async ()=>{
     saveSettingsBtn.disabled = true;
-    const r = await postJSON("/api/admin/config", { chat_id, user_id, timer_seconds: chosenTimer, rounds_total: chosenRounds }).catch(()=>({ok:false}));
-    saveSettingsBtn.disabled = false;
-    if (r.ok) getState({soft:false});
+    try{
+      const r = await postJSON("/api/admin/config", { chat_id, user_id, timer_seconds: chosenTimer, rounds_total: chosenRounds });
+      if (r.ok) getState({soft:false});
+    } catch(e) {
+      renderLoading("Не удаётся сохранить настройки. Проверь соединение.");
+    } finally { saveSettingsBtn.disabled = false; }
   };
 
   const startBtn = document.getElementById("startRound");
@@ -407,6 +413,8 @@ function renderAdmin(state){
       if (!c.ok) { startBtn.disabled=false; return; }
       const r = await postJSON("/api/admin/start", { chat_id, user_id, timer_seconds: chosenTimer });
       if (r.ok) getState({soft:false});
+    } catch(e){
+      renderLoading("Старт не удался. Сервер молчит.");
     } finally { startBtn.disabled = false; }
   };
 
@@ -417,6 +425,8 @@ function renderAdmin(state){
     try{
       const r = await postJSON("/api/admin/next", {chat_id, user_id});
       if (r.ok) getState({soft:false});
+    } catch(e){
+      renderLoading("Не получилось перейти к следующему вопросу.");
     } finally { nextBtn.disabled = false; }
   };
 
@@ -427,6 +437,8 @@ function renderAdmin(state){
     try{
       const r = await postJSON("/api/admin/force_start", {chat_id, user_id});
       if (r.ok) getState({soft:false});
+    } catch(e){
+      renderLoading("Форс-старт не сработал. Сервер в отпуске?");
     } finally { fsBtn.disabled = false; }
   };
 
@@ -440,6 +452,8 @@ function renderAdmin(state){
         renderFinalBoard(r.leaderboard || []);
         startRematchWatch();
       }
+    } catch(e){
+      renderLoading("Завершить квиз не удалось.");
     } finally { endBtn.disabled = false; }
   };
 
@@ -543,50 +557,60 @@ function renderFinalBoard(board){
       const s = await apiRematchState();
       const inList = s.ok && s.confirmed && s.confirmed[String(user_id)];
       if (inList){
-        await postJSON("/api/rematch/leave", {chat_id, user_id}).catch(()=>({ok:false}));
+        await postJSON("/api/rematch/leave", {chat_id, user_id});
       } else {
         const name = tg?.initDataUnsafe?.user?.first_name || "Игрок";
-        await postJSON("/api/rematch/join", {chat_id, user_id, name}).catch(()=>({ok:false}));
+        await postJSON("/api/rematch/join", {chat_id, user_id, name});
       }
       updateRematchAdminUI();
-    }catch(e){}
+    }catch(e){
+      renderLoading("Рематч недоступен. Сервер занят важными делами.");
+    }
   };
 
   updateRematchAdminUI(true);
 }
 
 async function updateRematchAdminUI(forceShow=false){
-  const data = await apiRematchState();
-  const box = document.getElementById("rematchAdmin");
-  if (!box) return;
-  if (!data.ok){ box.classList.add("hidden"); return; }
+  try{
+    const data = await apiRematchState();
+    const box = document.getElementById("rematchAdmin");
+    if (!box) return;
+    if (!data.ok){ box.classList.add("hidden"); return; }
 
-  if (forceShow || data.admin_id === user_id) box.classList.remove("hidden"); else box.classList.add("hidden");
+    if (forceShow || data.admin_id === user_id) box.classList.remove("hidden"); else box.classList.add("hidden");
 
-  const list = document.getElementById("rematchList");
-  const items = Object.values(data.confirmed || {});
-  if (list){
-    list.innerHTML = items.length ? items.map(n=>`<div>• ${n}</div>`).join("") : "<div>— пока никто</div>";
-  }
+    const list = document.getElementById("rematchList");
+    const items = Object.values(data.confirmed || {});
+    if (list){
+      list.innerHTML = items.length ? items.map(n=>`<div>• ${n}</div>`).join("") : "<div>— пока никто</div>";
+    }
 
-  const startBtn = document.getElementById("rematchStart");
-  if (startBtn){
-    startBtn.disabled = !(items.length >= 1);
-    startBtn.onclick = async ()=>{
-      if (startBtn.disabled) return;
-      const r = await postJSON("/api/rematch/start", {chat_id, user_id}).catch(()=>({ok:false}));
-      if (r.ok){
-        if (rematchTimer){ clearInterval(rematchTimer); rematchTimer=null; }
-        renderLoading("Запуск новой игры…");
-        getState({soft:false});
-      }
-    };
-  }
+    const startBtn = document.getElementById("rematchStart");
+    if (startBtn){
+      startBtn.disabled = !(items.length >= 1);
+      startBtn.onclick = async ()=>{
+        if (startBtn.disabled) return;
+        try{
+          const r = await postJSON("/api/rematch/start", {chat_id, user_id});
+          if (r.ok){
+            if (rematchTimer){ clearInterval(rematchTimer); rematchTimer=null; }
+            renderLoading("Запуск новой игры…");
+            getState({soft:false});
+          }
+        } catch(e){
+          renderLoading("Не удалось перезапустить квиз.");
+        }
+      };
+    }
 
-  const toggle = document.getElementById("rematchToggle");
-  if (toggle){
-    const inList = data.confirmed && data.confirmed[String(user_id)];
-    toggle.textContent = inList ? "✖️ Отменить участие" : "🔁 Участвовать ещё раз";
+    const toggle = document.getElementById("rematchToggle");
+    if (toggle){
+      const inList = data.confirmed && data.confirmed[String(user_id)];
+      toggle.textContent = inList ? "✖️ Отменить участие" : "🔁 Участвовать ещё раз";
+    }
+  } catch(e){
+    // молча
   }
 }
 function startRematchWatch(){
@@ -606,11 +630,16 @@ async function getState(opts={}){
 
     if (data.ended){
       stopPolling(); stopLocalTimer();
-      const rs = await apiRematchState();
-      if (rs.ok){
-        renderFinalBoard(rs.leaderboard || []);
-        startRematchWatch();
-      } else {
+      try{
+        const rs = await apiRematchState();
+        if (rs.ok){
+          renderFinalBoard(rs.leaderboard || []);
+          startRematchWatch();
+        } else {
+          renderLoading("Квиз завершён.");
+          resetBackgroundToDefault();
+        }
+      } catch {
         renderLoading("Квиз завершён.");
         resetBackgroundToDefault();
       }
@@ -677,22 +706,32 @@ async function getState(opts={}){
         }
       }
     }
-  }finally{
+  } catch (e){
+    console.error("getState error:", e);
+    renderLoading("Не могу достучаться до сервера. Убедись, что фронт и API на одном домене.");
+    startPolling(3000);
+  } finally{
     inFlight = false;
   }
 }
 
-async function submitAnswer(e){
-  const idx = parseInt(e.target.dataset.idx);
-  if (isNaN(idx)) return;
-  document.querySelectorAll(".option").forEach(b=>b.setAttribute("disabled","disabled"));
-  try{
-    const r = await postJSON("/api/submit", { chat_id, user: { id: user_id }, given: idx });
-    if (r.ok) getState({soft:false});
-    else document.querySelectorAll(".option").forEach(b=>b.removeAttribute("disabled"));
-  }catch(err){
-    document.querySelectorAll(".option").forEach(b=>b.removeAttribute("disabled"));
-  }
+function showWaitingOthers(state){
+  const readyDone = state.round?.ready_done || 0;
+  const readyTotal = state.round?.ready_total || 0;
+  const need = state.round?.ready_required || 1;
+
+  app.innerHTML = `
+    <div class="p-3 bg-purple-800/30 rounded-lg border border-white/10 text-center">
+      <p class="text-xl mb-2">Ожидаем готовность игроков…</p>
+      <p class="text-sm text-gray-100">Готовы: ${readyDone}/${readyTotal} (нужно ${need})</p>
+      <div class="mt-3">${buttonPrimary("imReady","✅ Я готов(а)")}</div>
+    </div>
+  `;
+  const btn = document.getElementById("imReady");
+  if (btn) btn.onclick = async ()=>{
+    btn.disabled = true;
+    try{ await apiRoundReady(); await getState({soft:false}); } catch { btn.disabled = false; }
+  };
 }
 
 // ---------- Точка входа ----------
