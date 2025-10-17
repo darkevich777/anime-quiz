@@ -125,4 +125,4 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .text-gray-100, .text-gray-200 { color: rgba(255,255,255,0.92); }
 
 /* На всякий случай: первый блок чуть отступает от верхнего края */
-#content > *:first-child { margin-top: 8px; }
+#content > *:first-child { margin-top: 12px; }
