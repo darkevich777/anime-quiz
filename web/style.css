@@ -1,3 +1,4 @@
+
 /* База */
 * { box-sizing: border-box; }
 html, body {
@@ -11,6 +12,12 @@ html, body {
                "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji",
                "Segoe UI Emoji", "Segoe UI Symbol";
 }
+
+/* учитываем safe-area для всей страницы, чтобы шапку не резало */
+body { padding-top: env(safe-area-inset-top, 0px); }
+
+/* Контейнер приложения — небольшой отступ сверху */
+#app { margin-top: 8px; }
 
 /* Контент: учитываем safe-area, чтобы верх не «рубился» */
 #content {
